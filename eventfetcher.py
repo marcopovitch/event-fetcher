@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import cPickle as pickle
+import _pickle as cPickle
 import logging
 import os.path
 import re
@@ -10,8 +10,8 @@ from obspy.clients.fdsn import Client
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
-logger = logging.getLogger('event_plotter')
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logger = logging.getLogger('EventFetcher')
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 
 class EventInfo(object):
@@ -25,7 +25,9 @@ class EventInfo(object):
         self.id = None
         self.latitude = None
         self.longitude = None
+        self.depth = None
         self.T0 = None
+        self.event_type = None
         self.qml = None
 
 
@@ -35,11 +37,13 @@ class EventFetcher(object):
                  event_id,
                  starttime=None,
                  endtime=None,
+                 time_length = 60,
                  base_url=None,
                  ws_event_url=None,
                  ws_station_url=None,
                  ws_dataselect_url=None,
                  black_listed_waveforms_id=None,
+                 waveforms_id=None,
                  backup_dirname='.',
                  use_cache=False,
                  fdsn_debug=False):
@@ -47,6 +51,7 @@ class EventFetcher(object):
         self.st = None
         self.starttime = starttime
         self.endtime = endtime
+        self.time_length = time_length 
 
         # set FDSN clients
         # configuring 3 differents urls doesn't work.
@@ -69,26 +74,32 @@ class EventFetcher(object):
         else:
             self.black_listed_waveforms_id = []
 
-
         self.event = EventInfo()
         self.event.id = event_id
         self.use_cache = use_cache
+        self._fetch_data(waveforms_id=waveforms_id)
+        self.get_picks()
 
-        self._fetch_data()
-
-    def _fetch_data(self):
-        # Fetch event from ws or cached files
+    def _fetch_data(self, waveforms_id=None):
+        # Fetch event's traces from ws or cached files
         cat = None
-        if not self.use_cache:
+        fetch_from_cache_success = None
+
+        if self.use_cache:
+            if os.path.isfile(self.backup_event_file):
+                logger.debug('Fetching event %s from file %s.',
+                             self.event.id, self.backup_event_file)
+                cat = read_events(self.backup_event_file)
+                fetch_from_cache_success = True
+            else:
+                logger.error('Trying to fetch event %s from file. But %s does not exist!',
+                             self.event.id, self.backup_event_file)
+                
+                fetch_from_cache_success = False
+        
+        if not self.use_cache or fetch_from_cache_success is not True: 
             logger.info('Fetching event %s from FDSN-WS.', self.event.id)
             cat = self.get_event()
-        elif os.path.isfile(self.backup_event_file):
-            logger.debug('Fetching event %s from file %s.',
-                         self.event.id, self.backup_event_file)
-            cat = read_events(self.backup_event_file)
-        else:
-            logger.error('Fetching event %s from file. But %s does not exist!',
-                         self.event.id, self.backup_event_file)
 
         if not cat:
             logger.error('No event found !')
@@ -100,13 +111,19 @@ class EventFetcher(object):
             logger.error(e)
             return
 
-        self.event.latitude, self.event.longitude = \
+        self.event.latitude, self.event.longitude, self.event.depth = \
             self.get_event_coordinates(self.event.qml)
         self.event.T0 = self.get_event_time(self.event.qml)
-        self.waveforms_id = \
-            self._hack_streams(self.get_event_waveforms_id(self.event.qml))
+        self.event.event_type = self.get_event_type(self.event.qml)
 
-        self.show_pick_offet(self.event.qml)
+
+        if waveforms_id:
+            self.waveforms_id = waveforms_id  
+        else:
+            self.waveforms_id = \
+                self._hack_streams(self.get_event_waveforms_id(self.event.qml))
+            self.show_pick_offet(self.event.qml)
+
 
         # Set time window for trace extraction
         self._set_extraction_time_window()
@@ -118,16 +135,29 @@ class EventFetcher(object):
             except Exception:
                 pass
 
-        if not self.use_cache:
+        fetch_from_cache_success = None
+        if self.use_cache:
+            if os.path.isfile(self.backup_traces_file):
+                logger.info('Fetching traces from cached file %s.',
+                            self.backup_traces_file)
+                with open(self.backup_traces_file, 'rb') as fp:
+                    self.st = cPickle.load(fp, fix_imports=True,
+                                           encoding="ASCII",
+                                           errors="strict")
+                
+                # remove black listed waveform_id
+                for w in self.black_listed_waveforms_id:
+                    for tr in self.st.select(id=w):
+                        self.st.remove(tr)
+                fetch_from_cache_success = True
+            else:
+                logger.error('Trying to fetch traces from cached file, but %s does not exist!',
+                             self.backup_event_file)
+                fetch_from_cache_success = False
+
+        if not self.use_cache or fetch_from_cache_success is not True:
             logger.info('Fetching traces from FDSN-WS.')
             self.st = self.get_trace(self.starttime, self.endtime)
-        elif os.path.isfile(self.backup_traces_file):
-            logger.info('Fetching traces from cached file %s.',
-                        self.backup_traces_file)
-            self.st = pickle.load(open(self.backup_traces_file, "rb"))
-        else:
-            logger.error('Fetching traces from cache. But %s does not exist !',
-                         self.backup_traces_file)
 
         if self.st == []:
             logger.warning('No traces !')
@@ -141,12 +171,17 @@ class EventFetcher(object):
         if self.starttime is None:
             self.starttime = self.event.T0
         if self.endtime is None:
-           self.endtime = self.starttime + 30
+           self.endtime = self.starttime + self.time_length 
+
+    def _hack_P_stream(self, waveforms_id):
+        waveforms_id = re.sub('\.HH$', '.HHZ', waveforms_id)
+        waveforms_id = re.sub('.$', 'Z', waveforms_id)
+        return waveforms_id
 
     def _hack_streams(self, waveforms_id):
         """ Hack to get rid off sc3 users misslabeling phases. """
-        waveforms_id = [re.sub('HH$', 'HZ', s) for s in waveforms_id]
-        waveforms_id = [re.sub('H1$', 'HZ', s) for s in waveforms_id]
+        waveforms_id = [re.sub('HH$', 'HHZ', s) for s in waveforms_id]
+        waveforms_id = [re.sub('H1$', 'HHZ', s) for s in waveforms_id]
         waveforms_id = [s for s in waveforms_id if s.endswith('HZ')]
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
@@ -155,6 +190,7 @@ class EventFetcher(object):
     def get_trace(self, starttime, endtime):
         """ Get waveform using FDSNWS """
         traces = Stream()
+        print(self.waveforms_id)
         for w in self.waveforms_id:
             logger.info('Working on %s ... ', w)
             net, sta, loc, chan = w.split('.')
@@ -172,7 +208,7 @@ class EventFetcher(object):
                 continue
 
             # be sure to have only one trace
-            waveform.merge(1)
+            waveform.merge(method=0, fill_value='interpolate')
             logger.debug(waveform)
 
             # get coordinates since attach_response seems not to be enough
@@ -204,7 +240,8 @@ class EventFetcher(object):
         # save tarces with pickle
         if self.backup_traces_file:
             logger.info('writting to %s', self.backup_traces_file)
-            pickle.dump(traces, open(self.backup_traces_file, "wb"))
+            with open(self.backup_traces_file, 'wb') as fp:
+                cPickle.dump(traces, fp)
         return traces
 
     def get_event(self):
@@ -223,11 +260,14 @@ class EventFetcher(object):
 
     def get_event_coordinates(self, e):
         o = e.preferred_origin()
-        return o.latitude, o.longitude
+        return o.latitude, o.longitude, o.depth/1000.
 
     def get_event_time(self, e):
         o = e.preferred_origin()
         return o.time
+
+    def get_event_type(self, e):
+        return e.event_type
 
     def get_event_waveforms_id(self, e):
         waveforms_id = []
@@ -247,9 +287,28 @@ class EventFetcher(object):
                                         tr.stats.coordinates.longitude,
                                         self.event.latitude,
                                         self.event.longitude)[0]
-            tr.stats.distance = distance
+            tr.stats.distance = distance  # in meters 
 
-    def show_pick_offet(self, e):
+    def get_picks(self, e=None):
+        self.picks = {}
+        if e is None:
+            e = self.event.qml
+
+        o = e.preferred_origin()
+        t0 = o.time
+        for a in o.arrivals:
+            if not a.phase.startswith('P'):
+                continue
+            for p in e.picks:
+                if a.pick_id == p.resource_id:
+                    wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
+                    self.picks[wfid] = {'time': p.time, 'offset': p.time - t0}
+                    break
+
+    def show_pick_offet(self, e=None):
+        if e is None:
+            e = self.event.qml
+
         o = e.preferred_origin()
         t0 = o.time
         for a in o.arrivals:
@@ -258,7 +317,7 @@ class EventFetcher(object):
             for p in e.picks:
                 if a.pick_id == p.resource_id:
                     logger.debug("%s %s %s",
-                                 p.waveform_id.get_seed_string(),
+                                 self._hack_P_stream(p.waveform_id.get_seed_string()),
                                  p.time,
                                  p.time - t0)
                     break
@@ -266,14 +325,15 @@ class EventFetcher(object):
 
 def _test():
     # ReNaSS
-    ws_base_url = 'http://renass.unistra.fr'
-    ws_event_url = 'http://renass-sc1.u-strasbg.fr:8080/fdsnws/event/1/'
-    ws_station_url = 'http://renass-sc1.u-strasbg.fr:8080/fdsnws/station/1/'
-    ws_dataselect_url = \
-        'https://dataselect-internal.u-strasbg.fr/fdsnws/dataselect/1/'
+    ws_base_url = 'http://10.0.1.36'
+    ws_event_url = 'http://10.0.1.36:8080/fdsnws/event/1/'
+    ws_station_url = 'http://10.0.1.36:8080/fdsnws/station/1/'
+    ws_dataselect_url = 'http://10.0.1.36:8080/fdsnws/dataselect/1/'
 
     # event
-    event_id = 'eost2018eukdpecq'
+    #event_id = 'eost2019uhsagsbu'
+    #event_id = 'eost2020vvqguwny'
+    event_id = 'eost2021nvpzrzto'
 
     # get data
     mydata = EventFetcher(event_id,
