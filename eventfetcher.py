@@ -300,7 +300,9 @@ class EventFetcher(object):
         for a in o.arrivals:
             for p in e.picks:
                 if a.pick_id == p.resource_id:
-                    waveforms_id.append(p.waveform_id.get_seed_string())
+                    wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
+                    waveforms_id.append(wfid)
+                    #waveforms_id.append(p.waveform_id.get_seed_string())
                     break
         return waveforms_id
 
