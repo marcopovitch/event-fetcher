@@ -40,6 +40,7 @@ class EventFetcher(object):
         event_id,
         starttime=None,
         endtime=None,
+        starttime_offset=0,
         time_length=60,
         base_url=None,
         ws_event_url=None,
@@ -55,6 +56,7 @@ class EventFetcher(object):
         self.st = None
         self.starttime = starttime
         self.endtime = endtime
+        self.starttime_offset = starttime_offset
         self.time_length = time_length
 
         # set FDSN clients
@@ -188,6 +190,8 @@ class EventFetcher(object):
         """Set time window for trace extraction"""
         if self.starttime is None:
             self.starttime = self.event.T0
+        self.starttime += self.starttime_offset
+
         if self.endtime is None:
             self.endtime = self.starttime + self.time_length
 
@@ -302,7 +306,7 @@ class EventFetcher(object):
                 if a.pick_id == p.resource_id:
                     wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
                     waveforms_id.append(wfid)
-                    #waveforms_id.append(p.waveform_id.get_seed_string())
+                    # waveforms_id.append(p.waveform_id.get_seed_string())
                     break
         return waveforms_id
 
@@ -331,7 +335,10 @@ class EventFetcher(object):
             for p in e.picks:
                 if a.pick_id == p.resource_id:
                     wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
-                    self.picks[wfid] = {"time": p.time, "offset": p.time - t0}
+                    self.picks[wfid] = {
+                        "time": p.time,
+                        "offset": p.time - (t0 + self.starttime_offset),
+                    }
                     break
 
     def show_pick_offet(self, e=None):
