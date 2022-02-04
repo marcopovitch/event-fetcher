@@ -104,7 +104,7 @@ class EventFetcher(object):
                 cat = read_events(self.backup_event_file)
                 fetch_from_cache_success = True
             else:
-                logger.error(
+                logger.debug(
                     "Trying to fetch event %s from file. But %s does not exist!",
                     self.event.id,
                     self.backup_event_file,
@@ -169,7 +169,7 @@ class EventFetcher(object):
                         self.st.remove(tr)
                 fetch_from_cache_success = True
             else:
-                logger.error(
+                logger.info(
                     "Trying to fetch traces from cached file, but %s does not exist!",
                     self.backup_event_file,
                 )
@@ -196,15 +196,17 @@ class EventFetcher(object):
             self.endtime = self.starttime + self.time_length
 
     def _hack_P_stream(self, waveforms_id):
-        waveforms_id = re.sub("\.HH$", ".HHZ", waveforms_id)
-        waveforms_id = re.sub(".$", "Z", waveforms_id)
+        waveforms_id = re.sub("HH.?$", "HHZ", waveforms_id)
+        # waveforms_id = re.sub("\.HH$", ".HHZ", waveforms_id)
+        # waveforms_id = re.sub(".$", "Z", waveforms_id)
         return waveforms_id
 
     def _hack_streams(self, waveforms_id):
-        """Hack to get rid off sc3 users misslabeling phases."""
-        waveforms_id = [re.sub("HH$", "HHZ", s) for s in waveforms_id]
-        waveforms_id = [re.sub("H1$", "HHZ", s) for s in waveforms_id]
-        waveforms_id = [s for s in waveforms_id if s.endswith("HZ")]
+        """Hack to get rid off sc3 users mislabeling phases."""
+        # waveforms_id = [re.sub("HH$", "HHZ", s) for s in waveforms_id]
+        # waveforms_id = [re.sub("H1$", "HHZ", s) for s in waveforms_id]
+        waveforms_id = [re.sub("HH.?$", "HH?", s) for s in waveforms_id]
+        # waveforms_id = [s for s in waveforms_id if s.endswith("HZ")]
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
         return waveforms_id
@@ -212,7 +214,7 @@ class EventFetcher(object):
     def get_trace(self, starttime, endtime):
         """Get waveform using FDSNWS"""
         traces = Stream()
-        print(self.waveforms_id)
+        # print(self.waveforms_id)
         for w in self.waveforms_id:
             logger.info("Working on %s ... ", w)
             net, sta, loc, chan = w.split(".")
@@ -231,7 +233,7 @@ class EventFetcher(object):
                 logger.debug("No data for trace %s [%s-%s]", w, starttime, endtime)
                 continue
 
-            # be sure to have only one trace
+            # be sure to have only one segment in trace
             waveform.merge(method=0, fill_value="interpolate")
             logger.debug(waveform)
 
@@ -252,9 +254,15 @@ class EventFetcher(object):
                 continue
 
             logger.debug(inventory)
-            waveform[0].stats.response = inventory
-            waveform[0].stats.coordinates = inventory.get_coordinates(w)
-            logger.debug("%s: %s", w, waveform[0].stats.coordinates)
+            for i, _w in enumerate(waveform):
+                _stats = _w.stats
+                _wid = ".".join(
+                    [_stats.network, _stats.station, _stats.location, _stats.channel]
+                )
+                logger.debug(_wid)
+                waveform[i].stats.response = inventory
+                waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
+                logger.debug("%s: %s", _wid, waveform[i].stats.coordinates)
 
             # store trace
             traces += waveform
@@ -275,8 +283,10 @@ class EventFetcher(object):
                 eventid=self.event.id, includearrivals=True
             )
         except Exception as e:
+            logger.error("Error getting event = %s" % self.event.id)
             logger.error(e)
-            return False
+            sys.exit()
+            
 
         if self.backup_event_file:
             logger.info(
