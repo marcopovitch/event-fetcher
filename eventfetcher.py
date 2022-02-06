@@ -196,8 +196,8 @@ class EventFetcher(object):
             self.endtime = self.starttime + self.time_length
 
     def _hack_P_stream(self, waveforms_id):
-        waveforms_id = re.sub(".HH$", ".HHZ", waveforms_id)
-        waveforms_id = re.sub(".EL$", ".ELZ", waveforms_id)
+        waveforms_id = re.sub(r"\.HH$", ".HHZ", waveforms_id)
+        waveforms_id = re.sub(r"\.EL$", ".ELZ", waveforms_id)
 
         waveforms_id = re.sub("H.?$", "HZ", waveforms_id)
         waveforms_id = re.sub("L.?$", "LZ", waveforms_id)
