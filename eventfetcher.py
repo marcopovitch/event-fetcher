@@ -197,12 +197,14 @@ class EventFetcher(object):
 
     def _hack_P_stream(self, waveforms_id):
         waveforms_id = re.sub("H.?$", "HZ", waveforms_id)
+        waveforms_id = re.sub("L.?$", "LZ", waveforms_id)
         # waveforms_id = re.sub("N.?$", "NZ", waveforms_id)
         return waveforms_id
 
     def _hack_streams(self, waveforms_id):
         """Hack to get rid off sc3 users mislabeling phases."""
         waveforms_id = [re.sub("H.?$", "H?", s) for s in waveforms_id]
+        waveforms_id = [re.sub("L.?$", "L?", s) for s in waveforms_id]
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
         return waveforms_id
