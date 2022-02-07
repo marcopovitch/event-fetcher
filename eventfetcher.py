@@ -235,8 +235,14 @@ class EventFetcher(object):
                 continue
 
             # be sure to have only one segment in trace
-            waveform.merge(method=0, fill_value="interpolate")
-            logger.debug(waveform)
+            try:
+                waveform.merge(method=0, fill_value="interpolate")
+            except Exception as e:
+                logger.error(e)
+                logger.info(waveform)
+                continue
+            else:
+                logger.debug(waveform)
 
             # get coordinates since attach_response seems not to be enough
             logger.debug("Start to fetch inventory for %s", w)
