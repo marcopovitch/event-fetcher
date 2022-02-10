@@ -48,6 +48,7 @@ class EventFetcher(object):
         ws_dataselect_url=None,
         black_listed_waveforms_id=None,
         waveforms_id=None,
+        enable_RTrotation=False,
         backup_dirname=".",
         use_cache=False,
         fdsn_debug=False,
@@ -58,6 +59,7 @@ class EventFetcher(object):
         self.endtime = endtime
         self.starttime_offset = starttime_offset
         self.time_length = time_length
+        self.enable_RTrotation = enable_RTrotation
 
         # set FDSN clients
         # configuring 3 differents urls doesn't work.
@@ -88,6 +90,11 @@ class EventFetcher(object):
         self.use_cache = use_cache
         self._fetch_data(waveforms_id=waveforms_id)
         self.get_picks()
+        self.compute_distance_az_baz()
+        if self.enable_RTrotation:
+            self.rotate_to_RT()
+        print(self.st.__str__(extended=True))
+
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
@@ -181,10 +188,7 @@ class EventFetcher(object):
 
         if self.st == []:
             logger.warning("No traces !")
-            return
 
-        print(self.st.__str__(extended=True))
-        self.compute_distance()
 
     def _set_extraction_time_window(self):
         """Set time window for trace extraction"""
@@ -284,6 +288,27 @@ class EventFetcher(object):
                 cPickle.dump(traces, fp)
         return traces
 
+    def rotate_to_RT(self):
+        # rotate traces
+        wids = []
+        for w in self.waveforms_id:
+            logger.info("Working on %s ... ", w)
+            net, sta, loc, chan = w.split(".")
+            wids.append(".".join((net, sta, loc, "*")))
+        wids = set(wids)
+
+        print(wids)
+        for wid in wids:
+            st = self.st.select(id=wid)
+            try:
+                logger.info("Rotating %s" % wid)
+                inventory = st[0].stats.response
+                st.rotate(method="->ZNE", inventory=inventory)
+                st.rotate(method="NE->RT", inventory=inventory)
+            except:
+                logger.warning("Can't rotate: %s" % wid)
+                logger.warning(st)
+
     def get_event(self):
         try:
             cat = self.event_client.get_events(
@@ -293,7 +318,6 @@ class EventFetcher(object):
             logger.error("Error getting event = %s" % self.event.id)
             logger.error(e)
             sys.exit()
-            
 
         if self.backup_event_file:
             logger.info(
@@ -327,17 +351,17 @@ class EventFetcher(object):
                     break
         return waveforms_id
 
-    def compute_distance(self):
-        # Calculating distance from SAC headers lat/lon
-        # (trace.stats.sac.stla and trace.stats.sac.stlo)
+    def compute_distance_az_baz(self):
+        # Calculating distance and azimuth from station to event
         for tr in self.st:
-            distance = gps2dist_azimuth(
+            distance, az, baz = gps2dist_azimuth(
                 tr.stats.coordinates.latitude,
                 tr.stats.coordinates.longitude,
                 self.event.latitude,
                 self.event.longitude,
-            )[0]
+            )
             tr.stats.distance = distance  # in meters
+            tr.stats.back_azimuth = az
 
     def get_picks(self, e=None):
         self.picks = {}
