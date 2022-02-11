@@ -92,9 +92,9 @@ class EventFetcher(object):
         self.get_picks()
         self.compute_distance_az_baz()
         if self.enable_RTrotation:
-            self.rotate_to_RT()
-        print(self.st.__str__(extended=True))
-
+            st_RT = self.rotate_to_RT()
+            self.st += st_RT
+        logger.info(self.st.__str__(extended=True))
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
@@ -188,7 +188,6 @@ class EventFetcher(object):
 
         if self.st == []:
             logger.warning("No traces !")
-
 
     def _set_extraction_time_window(self):
         """Set time window for trace extraction"""
@@ -289,7 +288,8 @@ class EventFetcher(object):
         return traces
 
     def rotate_to_RT(self):
-        # rotate traces
+        # make a copy and rotate traces
+        # return only R and T traces
         wids = []
         for w in self.waveforms_id:
             logger.info("Working on %s ... ", w)
@@ -297,9 +297,12 @@ class EventFetcher(object):
             wids.append(".".join((net, sta, loc, "*")))
         wids = set(wids)
 
-        print(wids)
+        # print(wids)
+        st_RT = Stream()
+        stcopy = self.st.copy()
+
         for wid in wids:
-            st = self.st.select(id=wid)
+            st = stcopy.select(id=wid)
             try:
                 logger.info("Rotating %s" % wid)
                 inventory = st[0].stats.response
@@ -308,6 +311,14 @@ class EventFetcher(object):
             except:
                 logger.warning("Can't rotate: %s" % wid)
                 logger.warning(st)
+            else:
+                # logger.warning(st)
+                # remove Z trace
+                for tr in st.select(component="Z"):
+                    st.remove(tr)
+                st_RT += st
+
+        return st_RT
 
     def get_event(self):
         try:
