@@ -271,7 +271,11 @@ class EventFetcher(object):
                 )
                 logger.debug(_wid)
                 waveform[i].stats.response = inventory
-                waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
+                try:
+                    waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
+                except Exception as e:
+                    logger.error(e)
+                    waveform[i].stats.coordinates = None
                 logger.debug("%s: %s", _wid, waveform[i].stats.coordinates)
 
             # store trace
@@ -365,6 +369,10 @@ class EventFetcher(object):
     def compute_distance_az_baz(self):
         # Calculating distance and azimuth from station to event
         for tr in self.st:
+            if 'coordinates' not in tr.stats or tr.stats.coordinates is None:
+                logger.warning("compute_distance_az_baz: no coordinates for %s" % tr)
+                continue
+
             distance, az, baz = gps2dist_azimuth(
                 tr.stats.coordinates.latitude,
                 tr.stats.coordinates.longitude,
