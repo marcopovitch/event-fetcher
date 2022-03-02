@@ -91,10 +91,13 @@ class EventFetcher(object):
         self._fetch_data(waveforms_id=waveforms_id)
         self.get_picks()
         self.compute_distance_az_baz()
-        if self.enable_RTrotation:
+        if self.enable_RTrotation and self.st:
             st_RT = self.rotate_to_RT()
             self.st += st_RT
-        logger.info(self.st.__str__(extended=True))
+        if self.st:
+            logger.info(self.st.__str__(extended=True))
+        else:
+            logger.warning("No trace !")
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
@@ -290,6 +293,9 @@ class EventFetcher(object):
     def rotate_to_RT(self):
         # make a copy and rotate traces
         # return only R and T traces
+        if not hasattr(self, 'waveforms_id'):
+            return
+
         wids = []
         for w in self.waveforms_id:
             logger.info("Working on %s ... ", w)
@@ -364,6 +370,8 @@ class EventFetcher(object):
 
     def compute_distance_az_baz(self):
         # Calculating distance and azimuth from station to event
+        if not self.st:
+            return
         for tr in self.st:
             distance, az, baz = gps2dist_azimuth(
                 tr.stats.coordinates.latitude,
@@ -378,6 +386,9 @@ class EventFetcher(object):
         self.picks = {}
         if e is None:
             e = self.event.qml
+            if e is None:
+                return
+
 
         o = e.preferred_origin()
         t0 = o.time
