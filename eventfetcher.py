@@ -202,6 +202,8 @@ class EventFetcher(object):
             self.endtime = self.starttime + self.time_length
 
     def _hack_P_stream(self, waveforms_id):
+        waveforms_id = re.sub(r"-$", "?", waveforms_id)
+
         waveforms_id = re.sub(r"\.HH$", ".HHZ", waveforms_id)
         waveforms_id = re.sub(r"\.EL$", ".ELZ", waveforms_id)
 
@@ -267,6 +269,7 @@ class EventFetcher(object):
                 continue
 
             logger.debug(inventory)
+
             for i, _w in enumerate(waveform):
                 _stats = _w.stats
                 _wid = ".".join(
@@ -297,7 +300,7 @@ class EventFetcher(object):
     def rotate_to_RT(self):
         # make a copy and rotate traces
         # return only R and T traces
-        if not hasattr(self, 'waveforms_id'):
+        if not hasattr(self, "waveforms_id"):
             return
 
         wids = []
@@ -316,10 +319,14 @@ class EventFetcher(object):
             try:
                 logger.info("Rotating %s" % wid)
                 inventory = st[0].stats.response
+                # nb_channel = len(inventory.get_contents()["channels"])
+                # if nb_channel != 3:
+                #    logger.warning("%s has only %d channel" % (wid, nb_channel))
+                #    raise
                 st.rotate(method="->ZNE", inventory=inventory)
                 st.rotate(method="NE->RT", inventory=inventory)
-            except:
-                logger.warning("Can't rotate: %s" % wid)
+            except Exception as e:
+                logger.warning("Can't rotate: %s (%s)" % (wid, e))
                 logger.warning(st)
             else:
                 # logger.warning(st)
@@ -377,7 +384,7 @@ class EventFetcher(object):
         if not self.st:
             return
         for tr in self.st:
-            if 'coordinates' not in tr.stats or tr.stats.coordinates is None:
+            if "coordinates" not in tr.stats or tr.stats.coordinates is None:
                 logger.warning("compute_distance_az_baz: no coordinates for %s" % tr)
                 continue
 
@@ -396,7 +403,6 @@ class EventFetcher(object):
             e = self.event.qml
             if e is None:
                 return
-
 
         o = e.preferred_origin()
         t0 = o.time
