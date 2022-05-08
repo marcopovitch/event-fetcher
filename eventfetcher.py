@@ -11,7 +11,7 @@ from obspy.geodetics import gps2dist_azimuth
 
 # default logger
 logger = logging.getLogger("EventFetcher")
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 
 class EventInfo(object):
@@ -187,7 +187,8 @@ class EventFetcher(object):
 
         if not self.use_cache or fetch_from_cache_success is not True:
             logger.info("Fetching traces from FDSN-WS.")
-            self.st = self.get_trace(self.starttime, self.endtime)
+            # self.st = self.get_trace(self.starttime, self.endtime)
+            self.st = self.get_trace_bulk(self.starttime, self.endtime)
 
         if self.st == []:
             logger.warning("No traces !")
@@ -219,6 +220,63 @@ class EventFetcher(object):
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
         return waveforms_id
+
+    def get_trace_bulk(self, starttime, endtime):
+        bulk = []
+        for w in self.waveforms_id:
+            net, sta, loc, chan = w.split(".")
+            bulk.append((net, sta, loc, chan, starttime, endtime))
+
+        # get traces but without response as it does not work as expected
+        try:
+            traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
+        except Exception as e:
+            logger.error(e)
+
+        # merge multiple segments if any
+        try:
+            traces.merge(method=0, fill_value="interpolate")
+        except Exception as e:
+            logger.error(e)
+
+        # get inventory
+        try:
+            inventory = self.trace_client.get_stations_bulk(bulk, level="response")
+        except Exception as e:
+            logger.error(e)
+
+        for i, _w in enumerate(traces):
+            _stats = _w.stats
+            _wid = ".".join(
+                [_stats.network, _stats.station, _stats.location, _stats.channel]
+            )
+            logger.debug(_wid)
+            traces[i].stats.response = inventory.select(
+                network=_stats.network,
+                station=_stats.station,
+                location=_stats.location,
+                # channel=_stats.channel,  # all channel have to be included for rotation !!??!!
+                time=starttime + (endtime - starttime) / 2,
+            )
+            logger.debug(traces[i].stats.response)
+            try:
+                traces[i].stats.coordinates = traces[i].stats.response.get_coordinates(
+                    _wid
+                )
+            except Exception as e:
+                logger.error(e)
+                traces[i].stats.coordinates = None
+            logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
+
+        # Sync all traces to starttime
+        traces.trim(starttime=starttime, endtime=endtime)
+
+        # save traces with pickle
+        if self.backup_traces_file:
+            logger.info("writting to %s", self.backup_traces_file)
+            with open(self.backup_traces_file, "wb") as fp:
+                cPickle.dump(traces, fp)
+        return traces
 
     def get_trace(self, starttime, endtime):
         """Get waveform using FDSNWS"""
@@ -290,7 +348,7 @@ class EventFetcher(object):
         # Sync all traces to starttime
         traces.trim(starttime=starttime, endtime=endtime)
 
-        # save tarces with pickle
+        # save traces with pickle
         if self.backup_traces_file:
             logger.info("writting to %s", self.backup_traces_file)
             with open(self.backup_traces_file, "wb") as fp:
@@ -318,7 +376,7 @@ class EventFetcher(object):
             st = stcopy.select(id=wid)
             try:
                 logger.info("Rotating %s" % wid)
-                inventory = st[0].stats.response
+                inventory = st[0].stats.response  # All channel should be included here
                 # nb_channel = len(inventory.get_contents()["channels"])
                 # if nb_channel != 3:
                 #    logger.warning("%s has only %d channel" % (wid, nb_channel))
