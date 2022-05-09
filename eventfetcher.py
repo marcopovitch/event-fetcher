@@ -11,7 +11,7 @@ from obspy.geodetics import gps2dist_azimuth
 
 # default logger
 logger = logging.getLogger("EventFetcher")
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 
 class EventInfo(object):
@@ -42,6 +42,7 @@ class EventFetcher(object):
         endtime=None,
         starttime_offset=0,
         time_length=60,
+        station_max_dist_km=None,
         base_url=None,
         ws_event_url=None,
         ws_station_url=None,
@@ -59,6 +60,7 @@ class EventFetcher(object):
         self.endtime = endtime
         self.starttime_offset = starttime_offset
         self.time_length = time_length
+        self.station_max_dist_km = station_max_dist_km
         self.enable_RTrotation = enable_RTrotation
 
         # set FDSN clients
@@ -227,21 +229,59 @@ class EventFetcher(object):
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
 
+        # get inventory
+        try:
+            inventory = self.trace_client.get_stations_bulk(bulk, level="response")
+        except Exception as e:
+            logger.error(e)
+
+        # get rid off stations too far away
+        if self.station_max_dist_km:
+            tmp_bulk = []
+            for net, sta, loc, chan, t1, t2 in bulk:
+                tmpchan = chan[:-1] + "Z"
+                w = ".".join((net, sta, loc, tmpchan))
+                t = (t1 + (t2 - t1) / 2,)
+                try:
+                    coord = inventory.get_coordinates(w, t)
+                except Exception as e:
+                    logger.error(e)
+                    continue
+
+                distance, az, baz = gps2dist_azimuth(
+                    coord["latitude"],
+                    coord["longitude"],
+                    self.event.latitude,
+                    self.event.longitude,
+                )
+                # distance in meters, convert it to km
+                distance = distance / 1000.0
+                if distance <= self.station_max_dist_km:
+                    tmp_bulk.append((net, sta, loc, chan, t1, t2))
+                else:
+                    logger.info(
+                        "Filtering out %s (dist(%.1f) > %.1f)"
+                        % (w, distance, self.station_max_dist_km)
+                    )
+                    # remove also channel in waveform_id
+                    tmp_waveforms_id = []
+                    for wid in self.waveforms_id:
+                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".") 
+                        if wid_net != net or wid_sta != sta:
+                            tmp_waveforms_id.append(wid)
+                    self.waveforms_id = tmp_waveforms_id
+            bulk = tmp_bulk
+
         # get traces but without response as it does not work as expected
         try:
             traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
         except Exception as e:
             logger.error(e)
+            return Stream()
 
         # merge multiple segments if any
         try:
             traces.merge(method=0, fill_value="interpolate")
-        except Exception as e:
-            logger.error(e)
-
-        # get inventory
-        try:
-            inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
             logger.error(e)
 
