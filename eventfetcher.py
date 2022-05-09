@@ -97,6 +97,7 @@ class EventFetcher(object):
             st_RT = self.rotate_to_RT()
             self.st += st_RT
         if self.st:
+            self.st.sort()
             logger.info(self.st.__str__(extended=True))
         else:
             logger.warning("No trace !")
@@ -323,7 +324,7 @@ class EventFetcher(object):
         traces = Stream()
         # print(self.waveforms_id)
         for w in self.waveforms_id:
-            logger.info("Working on %s ... ", w)
+            logger.debug("Working on %s ... ", w)
             net, sta, loc, chan = w.split(".")
 
             # get trace
@@ -403,7 +404,7 @@ class EventFetcher(object):
 
         wids = []
         for w in self.waveforms_id:
-            logger.info("Working on %s ... ", w)
+            logger.debug("Working on %s ... ", w)
             net, sta, loc, chan = w.split(".")
             wids.append(".".join((net, sta, loc, "*")))
         wids = set(wids)
@@ -414,8 +415,10 @@ class EventFetcher(object):
 
         for wid in wids:
             st = stcopy.select(id=wid)
+            st._trim_common_channels()
+
             try:
-                logger.info("Rotating %s" % wid)
+                logger.debug("Rotating %s" % wid)
                 inventory = st[0].stats.response  # All channel should be included here
                 # nb_channel = len(inventory.get_contents()["channels"])
                 # if nb_channel != 3:
