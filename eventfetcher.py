@@ -49,6 +49,7 @@ class EventFetcher(object):
         ws_dataselect_url=None,
         black_listed_waveforms_id=None,
         waveforms_id=None,
+        keep_only_3channels_station=False,
         enable_RTrotation=False,
         backup_dirname=".",
         use_cache=False,
@@ -61,6 +62,7 @@ class EventFetcher(object):
         self.starttime_offset = starttime_offset
         self.time_length = time_length
         self.station_max_dist_km = station_max_dist_km
+        self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
 
         # set FDSN clients
@@ -236,13 +238,36 @@ class EventFetcher(object):
         except Exception as e:
             logger.error(e)
 
+        # keep only stations with 3 component
+        if self.keep_only_3channels_station:
+            tmp_bulk = []
+            for net, sta, loc, chan, t1, t2 in bulk:
+                inv = inventory.select(
+                    network=net, station=sta, location=loc, time=t1 + (t2 - t1) / 2.0
+                )
+                if inv and len(inv[0][0]) == 3:
+                    tmp_bulk.append((net, sta, loc, chan, t1, t2))
+                else:
+                    w = ".".join((net, sta, loc, chan))
+                    logger.info(
+                        "Filtering out %s (only %d channel(s))" % (w, len(inv[0][0]))
+                    )
+                    # remove also channel in waveform_id
+                    tmp_waveforms_id = []
+                    for wid in self.waveforms_id:
+                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".")
+                        if wid_net != net or wid_sta != sta:
+                            tmp_waveforms_id.append(wid)
+                    self.waveforms_id = tmp_waveforms_id
+            bulk = tmp_bulk
+
         # get rid off stations too far away
         if self.station_max_dist_km:
             tmp_bulk = []
             for net, sta, loc, chan, t1, t2 in bulk:
                 tmpchan = chan[:-1] + "Z"
                 w = ".".join((net, sta, loc, tmpchan))
-                t = (t1 + (t2 - t1) / 2,)
+                t = t1 + (t2 - t1) / 2.0
                 try:
                     coord = inventory.get_coordinates(w, t)
                 except Exception as e:
@@ -267,7 +292,7 @@ class EventFetcher(object):
                     # remove also channel in waveform_id
                     tmp_waveforms_id = []
                     for wid in self.waveforms_id:
-                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".") 
+                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".")
                         if wid_net != net or wid_sta != sta:
                             tmp_waveforms_id.append(wid)
                     self.waveforms_id = tmp_waveforms_id
