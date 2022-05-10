@@ -25,7 +25,10 @@ def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
             w = ".".join((net, sta, loc, chan))
-            logger.info("Filtering out %s (only %d channel(s))" % (w, len(inv[0][0])))
+            if inv:
+                logger.info("Filtering out %s (only %d channel(s))" % (w, len(inv[0][0])))
+            else:
+                logger.info("Filtering out %s (no metadata)" % w)
             id = ".".join((net, sta, loc, chan))
             waveforms_id = cleanup_waveforms_id(waveforms_id, id)
     return waveforms_id, tmp_bulk
@@ -303,9 +306,11 @@ class EventFetcher(object):
 
         waveforms_id = re.sub(r"\.HH$", ".HHZ", waveforms_id)
         waveforms_id = re.sub(r"\.EL$", ".ELZ", waveforms_id)
+        waveforms_id = re.sub(r"\.HN$", ".HNZ", waveforms_id)
 
         waveforms_id = re.sub("H.?$", "HZ", waveforms_id)
         waveforms_id = re.sub("L.?$", "LZ", waveforms_id)
+        waveforms_id = re.sub("N.?$", "NZ", waveforms_id)
         # waveforms_id = re.sub("N.?$", "NZ", waveforms_id)
         return waveforms_id
 
@@ -313,6 +318,7 @@ class EventFetcher(object):
         """Hack to get rid off sc3 users mislabeling phases."""
         waveforms_id = [re.sub("H.?$", "H?", s) for s in waveforms_id]
         waveforms_id = [re.sub("L.?$", "L?", s) for s in waveforms_id]
+        waveforms_id = [re.sub("N.?$", "N?", s) for s in waveforms_id]
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
         return waveforms_id
