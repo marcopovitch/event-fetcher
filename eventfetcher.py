@@ -14,6 +14,97 @@ logger = logging.getLogger("EventFetcher")
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 
+def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
+    tmp_bulk = []
+    for net, sta, loc, chan, t1, t2 in bulk:
+        inv = inventory.select(
+            network=net, station=sta, location=loc, time=t1 + (t2 - t1) / 2.0
+        )
+        # channels = inv[0][0]
+        if inv and len(inv[0][0]) == 3:
+            tmp_bulk.append((net, sta, loc, chan, t1, t2))
+        else:
+            w = ".".join((net, sta, loc, chan))
+            logger.info("Filtering out %s (only %d channel(s))" % (w, len(inv[0][0])))
+            id = ".".join((net, sta, loc, chan))
+            waveforms_id = cleanup_waveforms_id(waveforms_id, id)
+    return waveforms_id, tmp_bulk
+
+
+def filter_out_station_by_distance(
+    waveforms_id, bulk, inventory, latitude, longitude, station_max_dist_km
+):
+    tmp_bulk = []
+    for net, sta, loc, chan, t1, t2 in bulk:
+        tmpchan = chan[:-1] + "Z"
+        w = ".".join((net, sta, loc, tmpchan))
+        t = t1 + (t2 - t1) / 2.0
+        try:
+            coord = inventory.get_coordinates(w, t)
+        except Exception as e:
+            logger.error(e)
+            continue
+
+        distance, az, baz = gps2dist_azimuth(
+            coord["latitude"],
+            coord["longitude"],
+            latitude,
+            longitude,
+        )
+        # distance in meters, convert it to km
+        distance = distance / 1000.0
+        if distance <= station_max_dist_km:
+            tmp_bulk.append((net, sta, loc, chan, t1, t2))
+        else:
+            logger.info(
+                "Filtering out %s (dist(%.1f) > %.1f)"
+                % (w, distance, station_max_dist_km)
+            )
+            id = ".".join((net, sta, loc, chan))
+            waveforms_id = cleanup_waveforms_id(waveforms_id, id)
+    return waveforms_id, tmp_bulk
+
+
+def cleanup_waveforms_id(waveforms_id, id):
+    net, sta, loc, chan = id.split(".")
+    wid_to_remove = []
+    for wid in waveforms_id:
+        wid_net, wid_sta, wid_loc, wid_chan = wid.split(".")
+        if wid_net == net and wid_sta == sta:
+            wid_to_remove.append(wid)
+
+    for wid in wid_to_remove:
+        waveforms_id.remove(wid)
+
+    return waveforms_id
+
+
+def remove_traces_without_3channels(waveforms_id, traces):
+    traces_done = []
+    traces_to_remove = []
+    for i, trace in enumerate(traces):
+        stats = trace.stats
+        net_sta_loc = ".".join([stats.network, stats.station, stats.location])
+        if net_sta_loc in traces_done:
+            continue
+
+        tmp = traces.select(
+            network=stats.network, station=stats.station, location=stats.location
+        )
+        if tmp.count() != 3:
+            for tr in tmp:
+                traces_to_remove.append(tr)
+        traces_done.append(net_sta_loc)
+
+    for tr in traces_to_remove:
+        net_sta_loc = '.'.join(tr.id.split('.')[:3])
+        logger.warning("Missing channel for %s: removing trace %s" % (net_sta_loc, tr.id))
+        traces.remove(tr)
+        cleanup_waveforms_id(waveforms_id, tr.id)
+
+    return waveforms_id
+
+
 class EventInfo(object):
     """Store basic event information
     - latitude
@@ -240,65 +331,22 @@ class EventFetcher(object):
 
         # keep only stations with 3 component
         if self.keep_only_3channels_station:
-            tmp_bulk = []
-            for net, sta, loc, chan, t1, t2 in bulk:
-                inv = inventory.select(
-                    network=net, station=sta, location=loc, time=t1 + (t2 - t1) / 2.0
-                )
-                if inv and len(inv[0][0]) == 3:
-                    tmp_bulk.append((net, sta, loc, chan, t1, t2))
-                else:
-                    w = ".".join((net, sta, loc, chan))
-                    logger.info(
-                        "Filtering out %s (only %d channel(s))" % (w, len(inv[0][0]))
-                    )
-                    # remove also channel in waveform_id
-                    tmp_waveforms_id = []
-                    for wid in self.waveforms_id:
-                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".")
-                        if wid_net != net or wid_sta != sta:
-                            tmp_waveforms_id.append(wid)
-                    self.waveforms_id = tmp_waveforms_id
-            bulk = tmp_bulk
+            self.waveforms_id, bulk = filter_out_channel_without_3channels(
+                self.waveforms_id, bulk, inventory
+            )
 
         # get rid off stations too far away
         if self.station_max_dist_km:
-            tmp_bulk = []
-            for net, sta, loc, chan, t1, t2 in bulk:
-                tmpchan = chan[:-1] + "Z"
-                w = ".".join((net, sta, loc, tmpchan))
-                t = t1 + (t2 - t1) / 2.0
-                try:
-                    coord = inventory.get_coordinates(w, t)
-                except Exception as e:
-                    logger.error(e)
-                    continue
+            self.waveforms_id, bulk = filter_out_station_by_distance(
+                self.waveforms_id,
+                bulk,
+                inventory,
+                self.event.latitude,
+                self.event.longitude,
+                self.station_max_dist_km,
+            )
 
-                distance, az, baz = gps2dist_azimuth(
-                    coord["latitude"],
-                    coord["longitude"],
-                    self.event.latitude,
-                    self.event.longitude,
-                )
-                # distance in meters, convert it to km
-                distance = distance / 1000.0
-                if distance <= self.station_max_dist_km:
-                    tmp_bulk.append((net, sta, loc, chan, t1, t2))
-                else:
-                    logger.info(
-                        "Filtering out %s (dist(%.1f) > %.1f)"
-                        % (w, distance, self.station_max_dist_km)
-                    )
-                    # remove also channel in waveform_id
-                    tmp_waveforms_id = []
-                    for wid in self.waveforms_id:
-                        wid_net, wid_sta, wid_loc, wid_cha = wid.split(".")
-                        if wid_net != net or wid_sta != sta:
-                            tmp_waveforms_id.append(wid)
-                    self.waveforms_id = tmp_waveforms_id
-            bulk = tmp_bulk
-
-        # get traces but without response as it does not work as expected
+        # get traces but without response as attach_response does not work as expected
         try:
             traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
         except Exception as e:
@@ -311,6 +359,7 @@ class EventFetcher(object):
         except Exception as e:
             logger.error(e)
 
+        # add inventory to trace
         for i, _w in enumerate(traces):
             _stats = _w.stats
             _wid = ".".join(
@@ -322,17 +371,24 @@ class EventFetcher(object):
                 station=_stats.station,
                 location=_stats.location,
                 # channel=_stats.channel,  # all channel have to be included for rotation !!??!!
-                time=starttime + (endtime - starttime) / 2,
+                time=starttime + (endtime - starttime) / 2.0,
             )
             logger.debug(traces[i].stats.response)
+
             try:
                 traces[i].stats.coordinates = traces[i].stats.response.get_coordinates(
                     _wid
                 )
             except Exception as e:
-                logger.error(e)
+                logger.error("No station coordinates for %s" % (_wid, e))
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
+
+        # Check if 3 channels are present (ie. no missing trace)
+        if self.keep_only_3channels_station:
+            self.waveforms_id = remove_traces_without_3channels(
+                self.waveforms_id, traces
+            )
 
         # Sync all traces to starttime
         traces.trim(starttime=starttime, endtime=endtime)
