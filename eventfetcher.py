@@ -10,8 +10,9 @@ from obspy.clients.fdsn import Client
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logger = logging.getLogger("EventFetcher")
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger.setLevel(logging.INFO)
 
 
 def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
@@ -26,7 +27,9 @@ def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
         else:
             w = ".".join((net, sta, loc, chan))
             if inv:
-                logger.info("Filtering out %s (only %d channel(s))" % (w, len(inv[0][0])))
+                logger.info(
+                    "Filtering out %s (only %d channel(s))" % (w, len(inv[0][0]))
+                )
             else:
                 logger.info("Filtering out %s (no metadata)" % w)
             id = ".".join((net, sta, loc, chan))
@@ -100,8 +103,10 @@ def remove_traces_without_3channels(waveforms_id, traces):
         traces_done.append(net_sta_loc)
 
     for tr in traces_to_remove:
-        net_sta_loc = '.'.join(tr.id.split('.')[:3])
-        logger.warning("Missing channel for %s: removing trace %s" % (net_sta_loc, tr.id))
+        net_sta_loc = ".".join(tr.id.split(".")[:3])
+        logger.warning(
+            "Missing channel for %s: removing trace %s" % (net_sta_loc, tr.id)
+        )
         traces.remove(tr)
         cleanup_waveforms_id(waveforms_id, tr.id)
 
@@ -194,7 +199,10 @@ class EventFetcher(object):
             self.st += st_RT
         if self.st:
             self.st.sort()
-            logger.info(self.st.__str__(extended=True))
+            if logger.level == logging.DEBUG:
+                logger.info(self.st.__str__(extended=True))
+            else:
+                logger.info(self.st)
         else:
             logger.warning("No trace !")
 
