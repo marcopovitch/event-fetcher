@@ -342,6 +342,7 @@ class EventFetcher(object):
             inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
             logger.error(e)
+            return Stream() 
 
         # keep only stations with 3 component
         if self.keep_only_3channels_station:
@@ -372,6 +373,7 @@ class EventFetcher(object):
             traces.merge(method=0, fill_value="interpolate")
         except Exception as e:
             logger.error(e)
+            return Stream()
 
         # add inventory to trace
         for i, _w in enumerate(traces):
