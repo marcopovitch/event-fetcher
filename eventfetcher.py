@@ -8,6 +8,7 @@ import warnings
 
 from obspy import Stream, read_events
 from obspy.clients.fdsn import Client
+from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
@@ -179,6 +180,7 @@ class EventFetcher(object):
                 "station": ws_station_url,
             },
         )
+        #self.trace_client = ClientSDS("/repacked/QualityControl/")  
         self.event_client = Client(
             debug=fdsn_debug, service_mappings={"event": ws_event_url}
         )
@@ -206,9 +208,9 @@ class EventFetcher(object):
             if logger.level == logging.DEBUG:
                 logger.info(self.st.__str__(extended=True))
             else:
-                logger.info(self.st)
+                logger.info("%s %s", self.event.id, self.st)
         else:
-            logger.warning("No trace !")
+            logger.warning("No trace (%s)!", self.event.id)
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
@@ -238,13 +240,13 @@ class EventFetcher(object):
             cat = self.get_event()
 
         if not cat:
-            logger.error("No event found !")
+            logger.error("(%s) No event found !" % self.event.id)
             return
 
         try:
             self.event.qml = cat.events[0]
         except Exception as e:
-            logger.error(e)
+            logger.error(self.event.id, e)
             return
 
         (
@@ -297,12 +299,12 @@ class EventFetcher(object):
                 fetch_from_cache_success = False
 
         if not self.use_cache or fetch_from_cache_success is not True:
-            logger.info("Fetching traces from FDSN-WS.")
+            logger.info("Fetching traces (%s) from FDSN-WS.", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
             self.st = self.get_trace_bulk(self.starttime, self.endtime)
 
         if self.st == []:
-            logger.warning("No traces !")
+            logger.warning("No traces (%s)!" % self.event.id)
 
     def _set_extraction_time_window(self):
         """Set time window for trace extraction"""
@@ -345,7 +347,7 @@ class EventFetcher(object):
         try:
             inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
-            logger.error(e)
+            logger.error(e, self.event.id)
             return Stream() 
 
         # keep only stations with 3 component
@@ -369,14 +371,14 @@ class EventFetcher(object):
         try:
             traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
         except Exception as e:
-            logger.error(e)
+            logger.error(e, self.event.id)
             return Stream()
 
         # merge multiple segments if any
         try:
             traces.merge(method=0, fill_value="interpolate")
         except Exception as e:
-            logger.error(e)
+            logger.error("%s %s" % (e, self.event.id))
             return Stream()
 
         # add inventory to trace
@@ -400,7 +402,7 @@ class EventFetcher(object):
                     _wid
                 )
             except Exception as e:
-                logger.error("No station coordinates for %s" % (_wid, e))
+                logger.error("(%s) No station coordinates for %s" % (self.event.id, _wid, e))
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
 
@@ -435,7 +437,7 @@ class EventFetcher(object):
                     net, sta, loc, chan, starttime, endtime, attach_response=False
                 )
             except Exception as e:
-                logger.error(e)
+                logger.error(e, self.event.id)
                 continue
 
             if not waveform:
@@ -446,8 +448,8 @@ class EventFetcher(object):
             try:
                 waveform.merge(method=0, fill_value="interpolate")
             except Exception as e:
-                logger.error(e)
-                logger.info(waveform)
+                logger.warning("%s %s", self.event.id, e)
+                logger.warning(waveform)
                 continue
             else:
                 logger.debug(waveform)
@@ -465,7 +467,7 @@ class EventFetcher(object):
                     level="response",
                 )
             except Exception as e:
-                logger.error(e)
+                logger.error(e, self.event.id)
                 continue
 
             logger.debug(inventory)
@@ -480,7 +482,7 @@ class EventFetcher(object):
                 try:
                     waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
                 except Exception as e:
-                    logger.error(e)
+                    logger.error(e, self.event.id)
                     waveform[i].stats.coordinates = None
                 logger.debug("%s: %s", _wid, waveform[i].stats.coordinates)
 
@@ -528,7 +530,7 @@ class EventFetcher(object):
                 st.rotate(method="->ZNE", inventory=inventory)
                 st.rotate(method="NE->RT", inventory=inventory)
             except Exception as e:
-                logger.warning("Can't rotate: %s (%s)" % (wid, e))
+                logger.warning("(%s) Can't rotate: %s (%s)",  self.event.id, wid, e)
                 logger.warning(st)
             else:
                 # logger.warning(st)
@@ -587,7 +589,7 @@ class EventFetcher(object):
             return
         for tr in self.st:
             if "coordinates" not in tr.stats or tr.stats.coordinates is None:
-                logger.warning("compute_distance_az_baz: no coordinates for %s" % tr)
+                logger.warning("(%s) compute_distance_az_baz: no coordinates for %s" % (self.event.id, tr))
                 continue
 
             distance, az, baz = gps2dist_azimuth(
