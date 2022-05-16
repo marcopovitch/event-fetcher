@@ -4,15 +4,19 @@ import logging
 import os.path
 import re
 import sys
+import warnings
 
 from obspy import Stream, read_events
 from obspy.clients.fdsn import Client
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
+
+# hide quakeml warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
