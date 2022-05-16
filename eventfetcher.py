@@ -180,7 +180,7 @@ class EventFetcher(object):
                 "station": ws_station_url,
             },
         )
-        #self.trace_client = ClientSDS("/repacked/QualityControl/")  
+        #self.trace_client = ClientSDS("/repacked/QualityControl/")
         self.event_client = Client(
             debug=fdsn_debug, service_mappings={"event": ws_event_url}
         )
@@ -347,8 +347,8 @@ class EventFetcher(object):
         try:
             inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
-            logger.error(e, self.event.id)
-            return Stream() 
+            logger.error("%s %s", e, self.event.id)
+            return Stream()
 
         # keep only stations with 3 component
         if self.keep_only_3channels_station:
@@ -371,14 +371,14 @@ class EventFetcher(object):
         try:
             traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
         except Exception as e:
-            logger.error(e, self.event.id)
+            logger.error("%s %s", e, self.event.id)
             return Stream()
 
         # merge multiple segments if any
         try:
             traces.merge(method=0, fill_value="interpolate")
         except Exception as e:
-            logger.error("%s %s" % (e, self.event.id))
+            logger.error("%s %s", e, self.event.id)
             return Stream()
 
         # add inventory to trace
@@ -437,7 +437,7 @@ class EventFetcher(object):
                     net, sta, loc, chan, starttime, endtime, attach_response=False
                 )
             except Exception as e:
-                logger.error(e, self.event.id)
+                logger.error("%s %s", e, self.event.id)
                 continue
 
             if not waveform:
@@ -467,7 +467,7 @@ class EventFetcher(object):
                     level="response",
                 )
             except Exception as e:
-                logger.error(e, self.event.id)
+                logger.error("%s %s", e, self.event.id)
                 continue
 
             logger.debug(inventory)
@@ -482,7 +482,7 @@ class EventFetcher(object):
                 try:
                     waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
                 except Exception as e:
-                    logger.error(e, self.event.id)
+                    logger.error("%s %s", e, self.event.id)
                     waveform[i].stats.coordinates = None
                 logger.debug("%s: %s", _wid, waveform[i].stats.coordinates)
 
