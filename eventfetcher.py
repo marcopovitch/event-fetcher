@@ -8,7 +8,7 @@ import warnings
 
 from obspy import Stream, read_events
 from obspy.clients.fdsn import Client
-from obspy.clients.filesystem.sds import Client as ClientSDS
+# from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
@@ -180,7 +180,7 @@ class EventFetcher(object):
                 "station": ws_station_url,
             },
         )
-        #self.trace_client = ClientSDS("/repacked/QualityControl/")
+        #self.trace_client_sds = ClientSDS("/miniseed/")
         self.event_client = Client(
             debug=fdsn_debug, service_mappings={"event": ws_event_url}
         )
@@ -206,9 +206,9 @@ class EventFetcher(object):
         if self.st:
             self.st.sort()
             if logger.level == logging.DEBUG:
-                logger.info(self.st.__str__(extended=True))
-            else:
-                logger.info("%s %s", self.event.id, self.st)
+                logger.debug(self.st.__str__(extended=True))
+            #else:
+            #    logger.info("%s %s", self.event.id, self.st)
         else:
             logger.warning("No trace (%s)!", self.event.id)
 
@@ -370,6 +370,7 @@ class EventFetcher(object):
         # get traces but without response as attach_response does not work as expected
         try:
             traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
+            #traces = self.trace_client_sds.get_waveforms_bulk(bulk)
         except Exception as e:
             logger.error("%s %s", e, self.event.id)
             return Stream()
@@ -531,7 +532,7 @@ class EventFetcher(object):
                 st.rotate(method="NE->RT", inventory=inventory)
             except Exception as e:
                 logger.warning("(%s) Can't rotate: %s (%s)",  self.event.id, wid, e)
-                logger.warning(st)
+                #logger.warning(st)
             else:
                 # logger.warning(st)
                 # remove Z trace
