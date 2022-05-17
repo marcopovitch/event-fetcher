@@ -8,7 +8,7 @@ import warnings
 
 from obspy import Stream, read_events
 from obspy.clients.fdsn import Client
-# from obspy.clients.filesystem.sds import Client as ClientSDS
+from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
 # default logger
@@ -151,6 +151,7 @@ class EventFetcher(object):
         ws_event_url=None,
         ws_station_url=None,
         ws_dataselect_url=None,
+        sds=None,
         black_listed_waveforms_id=None,
         waveforms_id=None,
         keep_only_3channels_station=False,
@@ -168,6 +169,21 @@ class EventFetcher(object):
         self.station_max_dist_km = station_max_dist_km
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
+        self.sds = sds
+
+        if not os.path.isdir(backup_dirname):
+            try:
+                os.makedirs(backup_dirname)
+                logger.info("set up %s as cache directory", backup_dirname)
+            except Exception as e:
+                logger.error("Can't create cache directory '%s' !", backup_dirname)
+                self.event = EventInfo()
+                return 
+
+        self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
+        self.backup_traces_file = os.path.join(
+            backup_dirname, "{}.traces".format(event_id)
+        )
 
         # set FDSN clients
         # configuring 3 differents urls doesn't work.
@@ -180,15 +196,15 @@ class EventFetcher(object):
                 "station": ws_station_url,
             },
         )
-        #self.trace_client_sds = ClientSDS("/miniseed/")
+
+        # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
+        if self.sds:
+            self.trace_client_sds = ClientSDS(self.sds)
+
         self.event_client = Client(
             debug=fdsn_debug, service_mappings={"event": ws_event_url}
         )
 
-        self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
-        self.backup_traces_file = os.path.join(
-            backup_dirname, "{}.traces".format(event_id)
-        )
         if black_listed_waveforms_id:
             self.black_listed_waveforms_id = black_listed_waveforms_id
         else:
@@ -207,7 +223,7 @@ class EventFetcher(object):
             self.st.sort()
             if logger.level == logging.DEBUG:
                 logger.debug(self.st.__str__(extended=True))
-            #else:
+            # else:
             #    logger.info("%s %s", self.event.id, self.st)
         else:
             logger.warning("No trace (%s)!", self.event.id)
@@ -369,8 +385,11 @@ class EventFetcher(object):
 
         # get traces but without response as attach_response does not work as expected
         try:
-            traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
-            #traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+            if self.sds:
+                # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
+                traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+            else:
+                traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
         except Exception as e:
             logger.error("%s %s", e, self.event.id)
             return Stream()
@@ -403,7 +422,9 @@ class EventFetcher(object):
                     _wid
                 )
             except Exception as e:
-                logger.error("(%s) No station coordinates for %s" % (self.event.id, _wid, e))
+                logger.error(
+                    "(%s) No station coordinates for %s" % (self.event.id, _wid, e)
+                )
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
 
@@ -531,8 +552,8 @@ class EventFetcher(object):
                 st.rotate(method="->ZNE", inventory=inventory)
                 st.rotate(method="NE->RT", inventory=inventory)
             except Exception as e:
-                logger.warning("(%s) Can't rotate: %s (%s)",  self.event.id, wid, e)
-                #logger.warning(st)
+                logger.warning("(%s) Can't rotate: %s (%s)", self.event.id, wid, e)
+                # logger.warning(st)
             else:
                 # logger.warning(st)
                 # remove Z trace
@@ -590,7 +611,10 @@ class EventFetcher(object):
             return
         for tr in self.st:
             if "coordinates" not in tr.stats or tr.stats.coordinates is None:
-                logger.warning("(%s) compute_distance_az_baz: no coordinates for %s" % (self.event.id, tr))
+                logger.warning(
+                    "(%s) compute_distance_az_baz: no coordinates for %s"
+                    % (self.event.id, tr)
+                )
                 continue
 
             distance, az, baz = gps2dist_azimuth(
