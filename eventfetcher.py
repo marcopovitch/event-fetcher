@@ -16,9 +16,6 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
-# hide quakeml warnings
-warnings.filterwarnings("ignore", category=UserWarning)
-
 
 def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
     tmp_bulk = []
@@ -178,7 +175,7 @@ class EventFetcher(object):
             except Exception as e:
                 logger.error("Can't create cache directory '%s' !", backup_dirname)
                 self.event = EventInfo()
-                return 
+                return
 
         self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
         self.backup_traces_file = os.path.join(
@@ -423,7 +420,7 @@ class EventFetcher(object):
                 )
             except Exception as e:
                 logger.error(
-                    "(%s) No station coordinates for %s" % (self.event.id, _wid, e)
+                    "(%s) No station coordinates for %s (%s)" % (self.event.id, _wid, e)
                 )
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
@@ -564,22 +561,26 @@ class EventFetcher(object):
         return st_RT
 
     def get_event(self):
-        try:
-            cat = self.event_client.get_events(
-                eventid=self.event.id, includearrivals=True
-            )
-        except Exception as e:
-            logger.error("Error getting event = %s" % self.event.id)
-            logger.error(e)
-            sys.exit()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
 
-        if self.backup_event_file:
-            logger.info(
-                "writting event (%s) to quakeml file %s",
-                self.event.id,
-                self.backup_event_file,
-            )
-            cat.write(self.backup_event_file, format="QUAKEML")
+            try:
+                cat = self.event_client.get_events(
+                    eventid=self.event.id, includearrivals=True
+                )
+            except Exception as e:
+                logger.error("Error getting event = %s" % self.event.id)
+                logger.error(e)
+                sys.exit()
+
+
+            if self.backup_event_file:
+                logger.info(
+                    "writting event (%s) to quakeml file %s",
+                    self.event.id,
+                    self.backup_event_file,
+                )
+                cat.write(self.backup_event_file, format="QUAKEML")
         return cat
 
     def get_event_coordinates(self, e):
