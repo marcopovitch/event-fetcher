@@ -184,6 +184,7 @@ class EventFetcher(object):
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
         self.sds = sds
+        self.use_cache = use_cache
 
         if not os.path.isdir(backup_dirname):
             try:
@@ -226,13 +227,26 @@ class EventFetcher(object):
 
         self.event = EventInfo()
         self.event.id = event_id
-        self.use_cache = use_cache
         self._fetch_data(waveforms_id=waveforms_id)
         self.get_picks()
         self.compute_distance_az_baz()
+
         if self.enable_RTrotation and self.st:
             st_RT = self.rotate_to_RT()
             self.st += st_RT
+
+        # if a component is shorter, force same signal length (e.g. after rotation)
+        self.st._trim_common_channels()
+
+        # Sync all traces to starttime and endtime ... but could produce masked array
+        self.st.trim(starttime=starttime, endtime=endtime)
+
+        # save traces with pickle
+        if self.backup_traces_file:
+            logger.info("writting to %s", self.backup_traces_file)
+            with open(self.backup_traces_file, "wb") as fp:
+                cPickle.dump(self.st, fp)
+
         if self.st:
             self.st.sort()
             if logger.level == logging.DEBUG:
@@ -443,7 +457,7 @@ class EventFetcher(object):
                 )
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
-            
+
         # remove "flat" traces (with same value everywhere)
         self.waveforms_id = remove_flat_traces(self.waveforms_id, traces)
 
@@ -453,16 +467,9 @@ class EventFetcher(object):
                 self.waveforms_id, traces
             )
 
-        
-
         # Sync all traces to starttime
         traces.trim(starttime=starttime, endtime=endtime)
 
-        # save traces with pickle
-        if self.backup_traces_file:
-            logger.info("writting to %s", self.backup_traces_file)
-            with open(self.backup_traces_file, "wb") as fp:
-                cPickle.dump(traces, fp)
         return traces
 
     def get_trace(self, starttime, endtime):
@@ -535,11 +542,6 @@ class EventFetcher(object):
         # Sync all traces to starttime
         traces.trim(starttime=starttime, endtime=endtime)
 
-        # save traces with pickle
-        if self.backup_traces_file:
-            logger.info("writting to %s", self.backup_traces_file)
-            with open(self.backup_traces_file, "wb") as fp:
-                cPickle.dump(traces, fp)
         return traces
 
     def rotate_to_RT(self):
