@@ -87,6 +87,23 @@ def cleanup_waveforms_id(waveforms_id, id):
     return waveforms_id
 
 
+def remove_flat_traces(waveforms_id, traces):
+    traces_to_remove = []
+    for i, trace in enumerate(traces):
+        if trace.data.min() == trace.data.max():
+            traces_to_remove.append(trace)
+
+    for tr in traces_to_remove:
+        net_sta_loc = ".".join(tr.id.split(".")[:3])
+        logger.warning(
+            "Flat channel for %s detected: removing trace %s" % (net_sta_loc, tr.id)
+        )
+        traces.remove(tr)
+        cleanup_waveforms_id(waveforms_id, tr.id)
+
+    return waveforms_id
+
+
 def remove_traces_without_3channels(waveforms_id, traces):
     traces_done = []
     traces_to_remove = []
@@ -363,7 +380,7 @@ class EventFetcher(object):
             logger.error("%s %s", e, self.event.id)
             return Stream()
 
-        # keep only stations with 3 component
+        # keep only stations with 3 component (using inventory info only)
         if self.keep_only_3channels_station:
             self.waveforms_id, bulk = filter_out_channel_without_3channels(
                 self.waveforms_id, bulk, inventory
@@ -426,12 +443,17 @@ class EventFetcher(object):
                 )
                 traces[i].stats.coordinates = None
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
+            
+        # remove "flat" traces (with same value everywhere)
+        self.waveforms_id = remove_flat_traces(self.waveforms_id, traces)
 
         # Check if 3 channels are present (ie. no missing trace)
         if self.keep_only_3channels_station:
             self.waveforms_id = remove_traces_without_3channels(
                 self.waveforms_id, traces
             )
+
+        
 
         # Sync all traces to starttime
         traces.trim(starttime=starttime, endtime=endtime)
@@ -672,12 +694,12 @@ class EventFetcher(object):
 def _test():
     # webservice URL
     ws_base_url = "http://10.0.1.36"
-    ws_event_url = "http://10.0.1.36:8080/fdsnws/event/1/"
+    ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1/"
     ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1/"
     ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1/"
 
     # event
-    event_id = "eost2021nvpzrzto"
+    event_id = "fr2019bopkcg"
 
     # get data
     mydata = EventFetcher(
