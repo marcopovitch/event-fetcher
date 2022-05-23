@@ -253,7 +253,7 @@ class EventFetcher(object):
             cat = self.get_event()
 
         if not cat:
-            logger.error("(%s) No event found !" % self.event.id)
+            # logger.error("(%s) No event found !" % self.event.id)
             return
 
         try:
@@ -386,7 +386,9 @@ class EventFetcher(object):
                 # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
                 traces = self.trace_client_sds.get_waveforms_bulk(bulk)
             else:
-                traces = self.trace_client.get_waveforms_bulk(bulk, attach_response=False)
+                traces = self.trace_client.get_waveforms_bulk(
+                    bulk, attach_response=False
+                )
         except Exception as e:
             logger.error("%s %s", e, self.event.id)
             return Stream()
@@ -570,9 +572,8 @@ class EventFetcher(object):
                 )
             except Exception as e:
                 logger.error("Error getting event = %s" % self.event.id)
-                logger.error(e)
-                sys.exit()
-
+                logger.debug(e)
+                return None
 
             if self.backup_event_file:
                 logger.info(
@@ -669,15 +670,13 @@ class EventFetcher(object):
 
 
 def _test():
-    # ReNaSS
+    # webservice URL
     ws_base_url = "http://10.0.1.36"
     ws_event_url = "http://10.0.1.36:8080/fdsnws/event/1/"
     ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1/"
     ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1/"
 
     # event
-    # event_id = 'eost2019uhsagsbu'
-    # event_id = 'eost2020vvqguwny'
     event_id = "eost2021nvpzrzto"
 
     # get data
@@ -688,11 +687,13 @@ def _test():
         ws_station_url=ws_station_url,
         ws_dataselect_url=ws_dataselect_url,
         use_cache=False,
+        fdsn_debug=False,
     )
 
     if not mydata.st:
         logger.info("No data associated to event %s", event_id)
-        sys.exit()
+    else:
+        print(mydata.st.__str__(extended=True))
 
 
 if __name__ == "__main__":
