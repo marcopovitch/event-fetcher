@@ -236,7 +236,11 @@ class EventFetcher(object):
             self.st += st_RT
 
         # if a component is shorter, force same signal length (e.g. after rotation)
-        self.st._trim_common_channels()
+        try:
+            self.st._trim_common_channels()
+        except Exception as e:
+            logger.warning("(%s) can't _trim_common_channels(): %s", self.event.id, e)
+            raise
 
         # Sync all traces to starttime and endtime ... but could produce masked array
         self.st.trim(starttime=starttime, endtime=endtime)
@@ -563,7 +567,12 @@ class EventFetcher(object):
 
         for wid in wids:
             st = stcopy.select(id=wid)
-            st._trim_common_channels()
+            try:
+                st._trim_common_channels()
+            except Exception as e:
+                logger.warning(
+                    "(%s) in rotate_to_RT(), can't trim: %s (%s)", self.event.id, wid, e
+                )
 
             try:
                 logger.debug("Rotating %s" % wid)
