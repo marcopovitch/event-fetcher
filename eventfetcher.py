@@ -240,7 +240,6 @@ class EventFetcher(object):
             self.st._trim_common_channels()
         except Exception as e:
             logger.warning("(%s) can't _trim_common_channels(): %s", self.event.id, e)
-            raise
 
         # Sync all traces to starttime and endtime ... but could produce masked array
         self.st.trim(starttime=starttime, endtime=endtime)
