@@ -1,2 +1,2 @@
 # event-fetcher
-Event Fetcher
+Event Fetcher (quakeml and mseed)
