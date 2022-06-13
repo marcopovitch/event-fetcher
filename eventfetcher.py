@@ -171,7 +171,8 @@ class EventFetcher(object):
         keep_only_3channels_station=False,
         enable_RTrotation=False,
         backup_dirname=".",
-        use_cache=False,
+        enable_read_cache=False,
+        enable_write_cache=False,
         fdsn_debug=False,
     ):
 
@@ -184,7 +185,8 @@ class EventFetcher(object):
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
         self.sds = sds
-        self.use_cache = use_cache
+        self.enable_read_cache = enable_read_cache
+        self.enable_write_cache = enable_write_cache
 
         if not os.path.isdir(backup_dirname):
             try:
@@ -245,7 +247,7 @@ class EventFetcher(object):
         self.st.trim(starttime=starttime, endtime=endtime)
 
         # save traces with pickle
-        if self.backup_traces_file:
+        if self.enable_write_cache and self.backup_traces_file:
             logger.info("writting to %s", self.backup_traces_file)
             with open(self.backup_traces_file, "wb") as fp:
                 cPickle.dump(self.st, fp)
@@ -264,7 +266,7 @@ class EventFetcher(object):
         cat = None
         fetch_from_cache_success = None
 
-        if self.use_cache:
+        if self.enable_read_cache:
             if os.path.isfile(self.backup_event_file):
                 logger.debug(
                     "Fetching event %s from file %s.",
@@ -282,7 +284,7 @@ class EventFetcher(object):
 
                 fetch_from_cache_success = False
 
-        if not self.use_cache or fetch_from_cache_success is not True:
+        if not self.enable_read_cache or fetch_from_cache_success is not True:
             logger.info("Fetching event %s from FDSN-WS.", self.event.id)
             cat = self.get_event()
 
@@ -315,7 +317,9 @@ class EventFetcher(object):
         # Set time window for trace extraction
         self._set_extraction_time_window()
 
+        #
         # Fetch traces from ws or cached file
+        #
         for w in self.black_listed_waveforms_id:
             try:
                 self.waveforms_id.remove(w)
@@ -323,7 +327,7 @@ class EventFetcher(object):
                 pass
 
         fetch_from_cache_success = None
-        if self.use_cache:
+        if self.enable_read_cache:
             if os.path.isfile(self.backup_traces_file):
                 logger.info(
                     "Fetching traces from cached file %s.", self.backup_traces_file
@@ -345,7 +349,7 @@ class EventFetcher(object):
                 )
                 fetch_from_cache_success = False
 
-        if not self.use_cache or fetch_from_cache_success is not True:
+        if not self.enable_read_cache or fetch_from_cache_success is not True:
             logger.info("Fetching traces (%s) from FDSN-WS.", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
             self.st = self.get_trace_bulk(self.starttime, self.endtime)
@@ -607,7 +611,7 @@ class EventFetcher(object):
                 logger.debug(e)
                 return None
 
-            if self.backup_event_file:
+            if self.enable_write_cache and self.backup_event_file:
                 logger.info(
                     "writting event (%s) to quakeml file %s",
                     self.event.id,
@@ -718,7 +722,8 @@ def _test():
         ws_event_url=ws_event_url,
         ws_station_url=ws_station_url,
         ws_dataselect_url=ws_dataselect_url,
-        use_cache=False,
+        enable_read_cache=True,
+        enable_write_cache=True,
         fdsn_debug=False,
     )
 
