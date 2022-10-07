@@ -231,6 +231,8 @@ class EventFetcher(object):
         self.event.id = event_id
         self._fetch_data(waveforms_id=waveforms_id)
         self.get_picks()
+        if self.st == []:
+            return
         self.compute_distance_az_baz()
 
         if self.enable_RTrotation and self.st:
