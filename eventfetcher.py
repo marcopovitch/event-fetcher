@@ -168,6 +168,7 @@ class EventFetcher(object):
         sds=None,
         black_listed_waveforms_id=None,
         waveforms_id=None,
+        use_only_trace_with_weighted_arrival=True,
         keep_only_3channels_station=False,
         enable_RTrotation=False,
         backup_dirname=".",
@@ -182,6 +183,7 @@ class EventFetcher(object):
         self.starttime_offset = starttime_offset
         self.time_length = time_length
         self.station_max_dist_km = station_max_dist_km
+        self.use_only_trace_with_weighted_arrival = use_only_trace_with_weighted_arrival
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
         self.sds = sds
@@ -283,7 +285,6 @@ class EventFetcher(object):
                     self.event.id,
                     self.backup_event_file,
                 )
-
                 fetch_from_cache_success = False
 
         if not self.enable_read_cache or fetch_from_cache_success is not True:
@@ -311,8 +312,14 @@ class EventFetcher(object):
         if waveforms_id:
             self.waveforms_id = waveforms_id
         else:
+            logger.info(
+                "Use only traces with weight > 0 : %s",
+                self.use_only_trace_with_weighted_arrival
+            )
+
             self.waveforms_id = self._hack_streams(
                 self.get_event_waveforms_id(self.event.qml)
+                # self.get_event_waveforms_id_within_distance(self.event.qml, self.station_max_dist_km)
             )
             self.show_pick_offet(self.event.qml)
 
@@ -637,12 +644,45 @@ class EventFetcher(object):
         waveforms_id = []
         o = e.preferred_origin()
         for a in o.arrivals:
+            if a.time_weight == 0.0 and self.use_only_trace_with_weighted_arrival:
+                continue
             for p in e.picks:
                 if a.pick_id == p.resource_id:
                     wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
                     waveforms_id.append(wfid)
                     # waveforms_id.append(p.waveform_id.get_seed_string())
                     break
+        return waveforms_id
+
+    def get_event_waveforms_id_within_distance(self, e, dist_km):
+        o = e.preferred_origin()
+        t0 = o.time
+        # get waveform_id of all stations within dist_km radius
+        logger.debug(
+            "Start to fetch waveform_id for %s with %d radius", self.event.id, dist_km
+        )
+        try:
+            inventory = self.trace_client.get_stations(
+                starttime=t0,
+                endtime=t0,
+                level="channel",
+                latitude=self.event.latitude,
+                longitude=self.event.longitude,
+                minradius=0,
+                maxradius=dist_km / 111.0,  # dist in degres
+            )
+        except Exception as e:
+            logger.error("%s %s", e, self.event.id)
+            return []
+
+        waveforms_id = []
+        for net in inventory:
+            for sta in net:
+                for chan in sta.select(channel="[SH]HZ"):
+                    wf_id = ".".join(
+                        [net.code, sta.code, chan.location_code, chan.code]
+                    )
+                    waveforms_id.append(wf_id)
         return waveforms_id
 
     def compute_distance_az_baz(self):
