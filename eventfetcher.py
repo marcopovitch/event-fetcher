@@ -316,10 +316,16 @@ class EventFetcher(object):
                 "Use only traces with weight > 0 : %s",
                 self.use_only_trace_with_weighted_arrival,
             )
-            self.waveforms_id = self._hack_streams(
-                self.get_event_waveforms_id(self.event.qml)
-                # self.get_event_waveforms_id_within_distance(self.event.qml, self.station_max_dist_km)
-            )
+
+            if self.use_only_trace_with_weighted_arrival:
+                self.waveforms_id = self._hack_streams(
+                    self.get_event_waveforms_id(self.event.qml)
+                )
+            else:
+                self.waveforms_id = self._hack_streams(
+                    self.get_event_waveforms_id_within_distance(self.event.qml, self.station_max_dist_km)
+                )
+
             self.show_pick_offet(self.event.qml)
 
         # Set time window for trace extraction
