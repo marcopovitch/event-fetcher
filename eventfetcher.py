@@ -312,9 +312,8 @@ class EventFetcher(object):
         else:
             logger.info(
                 "Use only traces with weight > 0 : %s",
-                self.use_only_trace_with_weighted_arrival
+                self.use_only_trace_with_weighted_arrival,
             )
-
             self.waveforms_id = self._hack_streams(
                 self.get_event_waveforms_id(self.event.qml)
                 # self.get_event_waveforms_id_within_distance(self.event.qml, self.station_max_dist_km)
@@ -648,6 +647,7 @@ class EventFetcher(object):
                 if a.pick_id == p.resource_id:
                     wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
                     waveforms_id.append(wfid)
+                    logger.debug("Adding %s", wfid)
                     # waveforms_id.append(p.waveform_id.get_seed_string())
                     break
         return waveforms_id
@@ -668,6 +668,7 @@ class EventFetcher(object):
                 longitude=self.event.longitude,
                 minradius=0,
                 maxradius=dist_km / 111.0,  # dist in degres
+                includerestricted=True,
             )
         except Exception as e:
             logger.error("%s %s", e, self.event.id)
@@ -676,7 +677,7 @@ class EventFetcher(object):
         waveforms_id = []
         for net in inventory:
             for sta in net:
-                for chan in sta.select(channel="[SH]HZ"):
+                for chan in sta.select(channel="[SHE]HZ"):
                     wf_id = ".".join(
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
@@ -715,6 +716,7 @@ class EventFetcher(object):
         t0 = o.time
         for a in o.arrivals:
             if not a.phase.startswith("P"):
+                logger.debug("Removing %s, no P phase found !", a)
                 continue
             for p in e.picks:
                 if a.pick_id == p.resource_id:
