@@ -678,7 +678,7 @@ class EventFetcher(object):
         waveforms_id = []
         for net in inventory:
             for sta in net:
-                for chan in sta.select(channel="[SH]HZ"):
+                for chan in sta.select(channel="[ESH]HZ"):
                     wf_id = ".".join(
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
