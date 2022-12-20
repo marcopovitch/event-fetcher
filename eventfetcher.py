@@ -232,9 +232,14 @@ class EventFetcher(object):
         self.event = EventInfo()
         self.event.id = event_id
         self._fetch_data(waveforms_id=waveforms_id)
+        
         self.get_picks()
         if self.st == []:
             return
+        elif self.st is None: 
+            self.st = [] 
+            return
+
         self.compute_distance_az_baz()
 
         if self.enable_RTrotation and self.st:
@@ -621,8 +626,12 @@ class EventFetcher(object):
                     eventid=self.event.id, includearrivals=True
                 )
             except Exception as e:
-                logger.error("Error getting event = %s" % self.event.id)
+                logger.error("Error getting event %s" % self.event.id)
                 logger.debug(e)
+                return None
+
+            if len(cat.events) == 0:
+                logger.error("Empty event %s !" % self.event.id)
                 return None
 
             if self.enable_write_cache and self.backup_event_file:
