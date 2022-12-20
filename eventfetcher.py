@@ -780,9 +780,9 @@ def _test():
     if not mydata.st:
         logger.info("No data associated to event %s", event_id)
     else:
-        print(mydata.st.__str__(extended=True))
+        logger.info(mydata.st.__str__(extended=True))
 
 
 if __name__ == "__main__":
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
     _test()
