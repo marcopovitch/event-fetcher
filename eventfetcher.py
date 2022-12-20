@@ -29,11 +29,11 @@ def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
         else:
             w = ".".join((net, sta, loc, chan))
             if inv:
-                logger.info(
+                logger.debug(
                     "Filtering out %s (only %d channel(s))" % (w, len(inv[0][0]))
                 )
             else:
-                logger.info("Filtering out %s (no metadata)" % w)
+                logger.warning("Filtering out %s (no metadata)" % w)
             id = ".".join((net, sta, loc, chan))
             waveforms_id = cleanup_waveforms_id(waveforms_id, id)
     return waveforms_id, tmp_bulk
@@ -64,7 +64,7 @@ def filter_out_station_by_distance(
         if distance <= station_max_dist_km:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
-            logger.info(
+            logger.debug(
                 "Filtering out %s (dist(%.1f) > %.1f)"
                 % (w, distance, station_max_dist_km)
             )
@@ -288,7 +288,7 @@ class EventFetcher(object):
                 fetch_from_cache_success = False
 
         if not self.enable_read_cache or fetch_from_cache_success is not True:
-            logger.info("Fetching event %s from FDSN-WS.", self.event.id)
+            logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
             cat = self.get_event()
 
         if not cat:
@@ -312,7 +312,7 @@ class EventFetcher(object):
         if waveforms_id:
             self.waveforms_id = waveforms_id
         else:
-            logger.info(
+            logger.debug(
                 "Use only traces with weight > 0 : %s",
                 self.use_only_trace_with_weighted_arrival,
             )
@@ -364,7 +364,7 @@ class EventFetcher(object):
                 fetch_from_cache_success = False
 
         if not self.enable_read_cache or fetch_from_cache_success is not True:
-            logger.info("Fetching traces (%s) from FDSN-WS.", self.event.id)
+            logger.debug("Fetching traces (%s) from FDSN-WS.", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
             self.st = self.get_trace_bulk(self.starttime, self.endtime)
 
@@ -784,4 +784,5 @@ def _test():
 
 
 if __name__ == "__main__":
+    logger.setLevel(logging.DEBUG)
     _test()
