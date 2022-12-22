@@ -17,7 +17,7 @@ logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
 
-def filter_out_channel_without_3channels(waveforms_id, bulk, inventory):
+def filter_out_station_without_3channels(waveforms_id, bulk, inventory):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
         inv = inventory.select(
@@ -192,10 +192,10 @@ class EventFetcher(object):
 
         if not os.path.isdir(backup_dirname):
             try:
-                os.makedirs(backup_dirname)
-                logger.info("set up %s as cache directory", backup_dirname)
+                os.makedirs(backup_dirname, exist_ok=True)
+                logger.debug("set up %s as cache directory", backup_dirname)
             except Exception as e:
-                logger.error("Can't create cache directory '%s' !", backup_dirname)
+                logger.error("Can't create cache directory '%s' (%s) !", backup_dirname, e)
                 self.event = EventInfo()
                 return
 
@@ -257,7 +257,7 @@ class EventFetcher(object):
 
         # save traces with pickle
         if self.enable_write_cache and self.backup_traces_file:
-            logger.info("writting to %s", self.backup_traces_file)
+            logger.debug("writting to %s", self.backup_traces_file)
             with open(self.backup_traces_file, "wb") as fp:
                 cPickle.dump(self.st, fp)
 
@@ -348,7 +348,7 @@ class EventFetcher(object):
         fetch_from_cache_success = None
         if self.enable_read_cache:
             if os.path.isfile(self.backup_traces_file):
-                logger.info(
+                logger.debug(
                     "Fetching traces from cached file %s.", self.backup_traces_file
                 )
                 with open(self.backup_traces_file, "rb") as fp:
@@ -362,7 +362,7 @@ class EventFetcher(object):
                         self.st.remove(tr)
                 fetch_from_cache_success = True
             else:
-                logger.info(
+                logger.debug(
                     "Trying to fetch traces from cached file, but %s does not exist!",
                     self.backup_event_file,
                 )
@@ -422,7 +422,7 @@ class EventFetcher(object):
 
         # keep only stations with 3 component (using inventory info only)
         if self.keep_only_3channels_station:
-            self.waveforms_id, bulk = filter_out_channel_without_3channels(
+            self.waveforms_id, bulk = filter_out_station_without_3channels(
                 self.waveforms_id, bulk, inventory
             )
 
@@ -635,7 +635,7 @@ class EventFetcher(object):
                 return None
 
             if self.enable_write_cache and self.backup_event_file:
-                logger.info(
+                logger.debug(
                     "writting event (%s) to quakeml file %s",
                     self.event.id,
                     self.backup_event_file,
@@ -733,7 +733,7 @@ class EventFetcher(object):
         t0 = o.time
         for a in o.arrivals:
             if not a.phase.startswith("P"):
-                logger.debug("Removing %s, no P phase found !", a)
+                logger.debug("Looking for P phase: ignoring %s !", a.phase)
                 continue
             for p in e.picks:
                 if a.pick_id == p.resource_id:
