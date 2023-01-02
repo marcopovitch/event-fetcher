@@ -232,12 +232,12 @@ class EventFetcher(object):
         self.event = EventInfo()
         self.event.id = event_id
         self._fetch_data(waveforms_id=waveforms_id)
-        
+
         self.get_picks()
         if self.st == []:
             return
-        elif self.st is None: 
-            self.st = [] 
+        elif self.st is None:
+            self.st = []
             return
 
         self.compute_distance_az_baz()
@@ -268,7 +268,7 @@ class EventFetcher(object):
             # else:
             #    logger.info("%s %s", self.event.id, self.st)
         else:
-            logger.warning("No trace (%s)!", self.event.id)
+            logger.warning("No trace (%s) ine _fetch_data() !", self.event.id)
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
