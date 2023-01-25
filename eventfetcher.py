@@ -6,7 +6,7 @@ import re
 import sys
 import warnings
 
-from obspy import Stream, read_events
+from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
@@ -195,7 +195,9 @@ class EventFetcher(object):
                 os.makedirs(backup_dirname, exist_ok=True)
                 logger.debug("set up %s as cache directory", backup_dirname)
             except Exception as e:
-                logger.error("Can't create cache directory '%s' (%s) !", backup_dirname, e)
+                logger.error(
+                    "Can't create cache directory '%s' (%s) !", backup_dirname, e
+                )
                 self.event = EventInfo()
                 return
 
@@ -326,24 +328,16 @@ class EventFetcher(object):
                 self.waveforms_id = self._hack_streams(
                     self.get_event_waveforms_id(self.event.qml)
                 )
+                self.show_pick_offet(self.event.qml)
             else:
                 self.waveforms_id = self._hack_streams(
-                    self.get_event_waveforms_id_within_distance(self.event.qml, self.station_max_dist_km)
+                    self.get_event_waveforms_id_within_distance(
+                        self.event.qml, self.station_max_dist_km
+                    )
                 )
-
-            self.show_pick_offet(self.event.qml)
 
         # Set time window for trace extraction
         self._set_extraction_time_window()
-
-        #
-        # Fetch traces from ws or cached file
-        #
-        for w in self.black_listed_waveforms_id:
-            try:
-                self.waveforms_id.remove(w)
-            except Exception:
-                pass
 
         fetch_from_cache_success = None
         if self.enable_read_cache:
@@ -355,11 +349,6 @@ class EventFetcher(object):
                     self.st = cPickle.load(
                         fp, fix_imports=True, encoding="ASCII", errors="strict"
                     )
-
-                # remove black listed waveform_id
-                for w in self.black_listed_waveforms_id:
-                    for tr in self.st.select(id=w):
-                        self.st.remove(tr)
                 fetch_from_cache_success = True
             else:
                 logger.debug(
@@ -372,6 +361,10 @@ class EventFetcher(object):
             logger.debug("Fetching traces (%s) from FDSN-WS.", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
             self.st = self.get_trace_bulk(self.starttime, self.endtime)
+
+        # remove black listed channels
+        # to be optimized (at inventory level if possible)
+        self._remove_from_stream(self.black_listed_waveforms_id)
 
         if self.st == []:
             logger.warning("No traces (%s)!" % self.event.id)
@@ -406,6 +399,21 @@ class EventFetcher(object):
         # remove multiple same occurence
         waveforms_id = set(waveforms_id)
         return waveforms_id
+
+    def _remove_from_stream(self, waveforms_id_list):
+        # remove black listed waveform_id
+        # should be optimized (to be done at the inventory level, if possible)
+        for net, sta, loc, chan in waveforms_id_list:
+            wfid = f"{net}.{sta}.{loc}.{chan}"
+            for tr in self.st.select(
+                network=net, station=sta, location=loc, channel=chan
+            ):
+                try:
+                    self.st.remove(tr)
+                except Exception as e:
+                    logger.debug(f"Can't remove trace {wfid} ({e})")
+                else:
+                    logger.debug(f"Removed black listed trace fid {wfid}")
 
     def get_trace_bulk(self, starttime, endtime):
         bulk = []
@@ -454,7 +462,7 @@ class EventFetcher(object):
         try:
             traces.merge(method=0, fill_value="interpolate")
         except Exception as e:
-            logger.error("%s %s", e, self.event.id)
+            logger.error("(merge) %s %s", e, self.event.id)
             return Stream()
 
         # add inventory to trace
@@ -513,7 +521,7 @@ class EventFetcher(object):
                     net, sta, loc, chan, starttime, endtime, attach_response=False
                 )
             except Exception as e:
-                logger.error("%s %s", e, self.event.id)
+                logger.error("(get_trace/wf)%s %s", e, self.event.id)
                 continue
 
             if not waveform:
@@ -543,7 +551,7 @@ class EventFetcher(object):
                     level="response",
                 )
             except Exception as e:
-                logger.error("%s %s", e, self.event.id)
+                logger.error("(get_trace/inv)%s %s", e, self.event.id)
                 continue
 
             logger.debug(inventory)
@@ -670,11 +678,19 @@ class EventFetcher(object):
         return waveforms_id
 
     def get_event_waveforms_id_within_distance(self, e, dist_km):
+        if dist_km is None:
+            logger.error(
+                "When using use_only_trace_with_weighted_arrival=False,  station_max_dist_km must be defined !"
+            )
+            sys.exit(1)
+
         o = e.preferred_origin()
         t0 = o.time
         # get waveform_id of all stations within dist_km radius
         logger.debug(
-            "Start to fetch waveform_id for %s with %d radius", self.event.id, dist_km
+            "Start to fetch waveform_id for %s with %d km radius",
+            self.event.id,
+            dist_km,
         )
         try:
             inventory = self.trace_client.get_stations(
@@ -688,7 +704,9 @@ class EventFetcher(object):
                 includerestricted=True,
             )
         except Exception as e:
-            logger.error("%s %s", e, self.event.id)
+            logger.error(
+                "(get_event_waveforms_id_within_distance)%s %s", e, self.event.id
+            )
             return []
 
         waveforms_id = []
@@ -699,6 +717,7 @@ class EventFetcher(object):
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
                     waveforms_id.append(wf_id)
+                    # logger.debug(f"{wf_id} is in range.")
         return waveforms_id
 
     def compute_distance_az_baz(self):
@@ -767,12 +786,17 @@ class EventFetcher(object):
 def _test():
     # webservice URL
     ws_base_url = "http://10.0.1.36"
-    ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1/"
-    ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1/"
-    ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1/"
+    ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1"
+    ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1"
+    ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1"
+
+    #ws_base_url = "http://ws.resif.fr"
+    #ws_event_url = "https://ws.resif.fr/fdsnws/event/1"
+    #ws_station_url = "http://ws.resif.fr/fdsnws/station/1"
+    #ws_dataselect_url = "http://ws.resif.fr/fdsnws/dataselect/1"
 
     # event
-    event_id = "fr2019bopkcg"
+    event_id = "fr2022jjdzbt"
 
     # get data
     mydata = EventFetcher(
@@ -781,8 +805,8 @@ def _test():
         ws_event_url=ws_event_url,
         ws_station_url=ws_station_url,
         ws_dataselect_url=ws_dataselect_url,
-        enable_read_cache=True,
-        enable_write_cache=True,
+        enable_read_cache=False,
+        enable_write_cache=False,
         fdsn_debug=False,
     )
 
