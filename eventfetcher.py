@@ -416,6 +416,7 @@ class EventFetcher(object):
                     logger.debug(f"Removed black listed trace fid {wfid}")
 
     def get_trace_bulk(self, starttime, endtime):
+        logger.debug(f"{self.event.id}: getting inventory ...")
         bulk = []
         for w in self.waveforms_id:
             net, sta, loc, chan = w.split(".")
@@ -446,6 +447,7 @@ class EventFetcher(object):
             )
 
         # get traces but without response as attach_response does not work as expected
+        logger.debug(f"{self.event.id}: getting waveforms ...")
         try:
             if self.sds:
                 # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
