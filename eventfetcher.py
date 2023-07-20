@@ -5,6 +5,7 @@ import os.path
 import re
 import sys
 import warnings
+import numpy as np
 
 from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
@@ -17,7 +18,7 @@ logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
 
-def filter_out_station_without_3channels(waveforms_id, bulk, inventory):
+def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
         inv = inventory.select(
@@ -30,10 +31,11 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory):
             w = ".".join((net, sta, loc, chan))
             if inv:
                 logger.debug(
-                    "Filtering out %s (only %d channel(s))" % (w, len(inv[0][0]))
+                    "[%s] Filtering out %s (only %d channel(s))"
+                    % (txt, w, len(inv[0][0]))
                 )
             else:
-                logger.warning("Filtering out %s (no metadata)" % w)
+                logger.warning("[%s] Filtering out %s (no metadata)" % (txt, w))
             id = ".".join((net, sta, loc, chan))
             waveforms_id = cleanup_waveforms_id(waveforms_id, id)
     return waveforms_id, tmp_bulk
@@ -87,16 +89,20 @@ def cleanup_waveforms_id(waveforms_id, id):
     return waveforms_id
 
 
-def remove_flat_traces(waveforms_id, traces):
+def remove_flat_traces(waveforms_id, traces, txt):
+    # variance is used to detect flat signal
+    tolerance = 1e-5
     traces_to_remove = []
     for i, trace in enumerate(traces):
-        if trace.data.min() == trace.data.max():
+        variance = np.var(trace.data)
+        if variance < tolerance:
             traces_to_remove.append(trace)
 
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
         logger.warning(
-            "Flat channel for %s detected: removing trace %s" % (net_sta_loc, tr.id)
+            "[%s] Flat channel for %s detected: removing trace %s"
+            % (txt, net_sta_loc, tr.id)
         )
         traces.remove(tr)
         cleanup_waveforms_id(waveforms_id, tr.id)
@@ -104,7 +110,7 @@ def remove_flat_traces(waveforms_id, traces):
     return waveforms_id
 
 
-def remove_traces_without_3channels(waveforms_id, traces):
+def remove_traces_without_3channels(waveforms_id, traces, txt):
     traces_done = []
     traces_to_remove = []
     for i, trace in enumerate(traces):
@@ -124,7 +130,7 @@ def remove_traces_without_3channels(waveforms_id, traces):
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
         logger.warning(
-            "Missing channel for %s: removing trace %s" % (net_sta_loc, tr.id)
+            "[%s] Missing channel for %s: removing trace %s" % (txt, net_sta_loc, tr.id)
         )
         traces.remove(tr)
         cleanup_waveforms_id(waveforms_id, tr.id)
@@ -175,8 +181,9 @@ class EventFetcher(object):
         enable_read_cache=False,
         enable_write_cache=False,
         fdsn_debug=False,
+        log_level=logging.INFO
     ):
-
+        logger.setLevel(log_level)
         self.st = None
         self.starttime = starttime
         self.endtime = endtime
@@ -186,9 +193,16 @@ class EventFetcher(object):
         self.use_only_trace_with_weighted_arrival = use_only_trace_with_weighted_arrival
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
-        self.sds = sds
+        # cache
         self.enable_read_cache = enable_read_cache
         self.enable_write_cache = enable_write_cache
+        # fdsn or sds
+        self.sds = sds
+        self.fdsn_debug = fdsn_debug
+        self.base_url = base_url
+        self.ws_event_url = ws_event_url
+        self.ws_station_url = ws_station_url
+        self.ws_dataselect_url = ws_dataselect_url
 
         if not os.path.isdir(backup_dirname):
             try:
@@ -204,26 +218,6 @@ class EventFetcher(object):
         self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
         self.backup_traces_file = os.path.join(
             backup_dirname, "{}.traces".format(event_id)
-        )
-
-        # set FDSN clients
-        # configuring 3 differents urls doesn't work.
-        # we have to split in 2 Fdsn clients
-        self.trace_client = Client(
-            debug=fdsn_debug,
-            base_url=base_url,
-            service_mappings={
-                "dataselect": ws_dataselect_url,
-                "station": ws_station_url,
-            },
-        )
-
-        # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
-        if self.sds:
-            self.trace_client_sds = ClientSDS(self.sds)
-
-        self.event_client = Client(
-            debug=fdsn_debug, service_mappings={"event": ws_event_url}
         )
 
         if black_listed_waveforms_id:
@@ -294,7 +288,11 @@ class EventFetcher(object):
                 )
                 fetch_from_cache_success = False
 
-        if not self.enable_read_cache or fetch_from_cache_success is not True:
+        if not self.enable_read_cache or not fetch_from_cache_success:
+            self.event_client = Client(
+                debug=self.fdsn_debug, service_mappings={"event": self.ws_event_url}
+            )
+
             logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
             cat = self.get_event()
 
@@ -357,8 +355,24 @@ class EventFetcher(object):
                 )
                 fetch_from_cache_success = False
 
-        if not self.enable_read_cache or fetch_from_cache_success is not True:
-            logger.debug("Fetching traces (%s) from FDSN-WS.", self.event.id)
+        if not self.enable_read_cache or not fetch_from_cache_success:
+            # set FDSN clients
+            # configuring 3 differents urls doesn't work.
+            # we have to split in 2 Fdsn clients trace and event
+            self.trace_client = Client(
+                debug=self.fdsn_debug,
+                base_url=self.base_url,
+                service_mappings={
+                    "dataselect": self.ws_dataselect_url,
+                    "station": self.ws_station_url,
+                },
+            )
+
+            # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
+            if self.sds:
+                self.trace_client_sds = ClientSDS(self.sds)
+
+            logger.debug("Fetching traces (%s) from FDSN-WS or SDS", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
             self.st = self.get_trace_bulk(self.starttime, self.endtime)
 
@@ -432,7 +446,7 @@ class EventFetcher(object):
         # keep only stations with 3 component (using inventory info only)
         if self.keep_only_3channels_station:
             self.waveforms_id, bulk = filter_out_station_without_3channels(
-                self.waveforms_id, bulk, inventory
+                self.waveforms_id, bulk, inventory, self.event.id
             )
 
         # get rid off stations too far away
@@ -495,12 +509,12 @@ class EventFetcher(object):
             logger.debug("%s: %s", _wid, traces[i].stats.coordinates)
 
         # remove "flat" traces (with same value everywhere)
-        self.waveforms_id = remove_flat_traces(self.waveforms_id, traces)
+        self.waveforms_id = remove_flat_traces(self.waveforms_id, traces, self.event.id)
 
         # Check if 3 channels are present (ie. no missing trace)
         if self.keep_only_3channels_station:
             self.waveforms_id = remove_traces_without_3channels(
-                self.waveforms_id, traces
+                self.waveforms_id, traces, self.event.id
             )
 
         # Sync all traces to starttime
@@ -792,10 +806,10 @@ def _test():
     ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1"
     ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1"
 
-    #ws_base_url = "http://ws.resif.fr"
-    #ws_event_url = "https://ws.resif.fr/fdsnws/event/1"
-    #ws_station_url = "http://ws.resif.fr/fdsnws/station/1"
-    #ws_dataselect_url = "http://ws.resif.fr/fdsnws/dataselect/1"
+    # ws_base_url = "http://ws.resif.fr"
+    # ws_event_url = "https://ws.resif.fr/fdsnws/event/1"
+    # ws_station_url = "http://ws.resif.fr/fdsnws/station/1"
+    # ws_dataselect_url = "http://ws.resif.fr/fdsnws/dataselect/1"
 
     # event
     event_id = "fr2022jjdzbt"
