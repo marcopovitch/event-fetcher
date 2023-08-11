@@ -18,6 +18,68 @@ logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
 
+def phasenet_dump(traces, directory):
+    try:
+        os.makedirs(directory, exist_ok=True)
+        logger.debug("Directory '%s' created successfully." % directory)
+    except OSError as error:
+        logger.error("Directory '%s' can not be created !" % directory)
+
+    # get net.cha.loc.* from all traces
+    wfids = set()
+    for tr in traces:
+        wfids.add(".".join(tr.id.split(".")[:3]))
+    wfids = list(map(lambda x: x + ".*", wfids))
+
+    for wfid in wfids:
+        net_sta_loc = ".".join(wfid.split(".")[:3])
+        st = traces.select(id=wfid)
+        filename = os.path.join(
+            directory,
+            f"{net_sta_loc}.mseed",
+        )
+        st.write(filename, format="MSEED")
+
+    # generates chan.txt for dbclust
+    chantxt_filename = os.path.join(directory, "chan.txt")
+    with open(chantxt_filename, "w") as fp:
+        for wfid in wfids:
+            st = traces.select(id=wfid).sort(["channel"], reverse=True)
+            for tr in st:
+                s = tr.stats
+                fp.write(f"{s.network}_{s.station}_{s.location}_{s.channel}\n")
+
+    # generates csv file
+    csv_filename = os.path.join(directory, "fname.csv")
+    with open(csv_filename, "w") as fp:
+        fp.write("fname,E,N,Z\n")
+        for wfid in wfids:
+            filename = ".".join(wfid.split(".")[:3]) + ".mseed"
+            st = traces.select(id=wfid)
+            Z_trace = st.select(component="Z")[0]
+            st.remove(Z_trace)
+            st.sort(["channel"], reverse=False)
+            fp.write(
+                f"{filename},{st[0].stats.channel},{st[1].stats.channel},{Z_trace.stats.channel}\n"
+            )
+
+
+def mseed_dump(traces, directory):
+    try:
+        os.makedirs(directory, exist_ok=True)
+        logger.debug("Directory '%s' created successfully." % directory)
+    except OSError as error:
+        logger.error("Directory '%s' can not be created !" % directory)
+
+    for tr in traces:
+        stats = tr.stats
+        filename = os.path.join(
+            directory,
+            f"{stats.network}.{stats.station}.{stats.location}.{stats.channel}.{stats.starttime}.{stats.endtime}.mseed",
+        )
+        tr.write(filename, format="MSEED")
+
+
 def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
@@ -180,8 +242,9 @@ class EventFetcher(object):
         backup_dirname=".",
         enable_read_cache=False,
         enable_write_cache=False,
+        write_cache_format="pickle",
         fdsn_debug=False,
-        log_level=logging.INFO
+        log_level=logging.INFO,
     ):
         logger.setLevel(log_level)
         self.st = None
@@ -196,6 +259,7 @@ class EventFetcher(object):
         # cache
         self.enable_read_cache = enable_read_cache
         self.enable_write_cache = enable_write_cache
+        self.write_cache_format = write_cache_format
         # fdsn or sds
         self.sds = sds
         self.fdsn_debug = fdsn_debug
@@ -203,6 +267,7 @@ class EventFetcher(object):
         self.ws_event_url = ws_event_url
         self.ws_station_url = ws_station_url
         self.ws_dataselect_url = ws_dataselect_url
+        self.trace_client = None
 
         if not os.path.isdir(backup_dirname):
             try:
@@ -216,9 +281,7 @@ class EventFetcher(object):
                 return
 
         self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
-        self.backup_traces_file = os.path.join(
-            backup_dirname, "{}.traces".format(event_id)
-        )
+        self.backup_traces_file = os.path.join(backup_dirname, "waveforms")
 
         if black_listed_waveforms_id:
             self.black_listed_waveforms_id = black_listed_waveforms_id
@@ -254,8 +317,21 @@ class EventFetcher(object):
         # save traces with pickle
         if self.enable_write_cache and self.backup_traces_file:
             logger.debug("writting to %s", self.backup_traces_file)
-            with open(self.backup_traces_file, "wb") as fp:
-                cPickle.dump(self.st, fp)
+            if self.write_cache_format == "pickle":
+                with open(self.backup_traces_file, "wb") as fp:
+                    cPickle.dump(self.st, fp)
+            elif self.write_cache_format == "mseed":
+                try:
+                    mseed_dump(self.st, self.backup_traces_file)
+                except Exception as e:
+                    logger.error(e)
+                    return
+            elif self.write_cache_format == "phasenet":
+                try:
+                    phasenet_dump(self.st, self.backup_traces_file)
+                except Exception as e:
+                    logger.error(e)
+                    return
 
         if self.st:
             self.st.sort()
@@ -264,7 +340,7 @@ class EventFetcher(object):
             # else:
             #    logger.info("%s %s", self.event.id, self.st)
         else:
-            logger.warning("No trace (%s) ine _fetch_data() !", self.event.id)
+            logger.warning("No trace (%s) in _fetch_data() !", self.event.id)
 
     def _fetch_data(self, waveforms_id=None):
         # Fetch event's traces from ws or cached files
@@ -359,14 +435,15 @@ class EventFetcher(object):
             # set FDSN clients
             # configuring 3 differents urls doesn't work.
             # we have to split in 2 Fdsn clients trace and event
-            self.trace_client = Client(
-                debug=self.fdsn_debug,
-                base_url=self.base_url,
-                service_mappings={
-                    "dataselect": self.ws_dataselect_url,
-                    "station": self.ws_station_url,
-                },
-            )
+            if not self.trace_client: 
+                self.trace_client = Client(
+                    debug=self.fdsn_debug,
+                    base_url=self.base_url,
+                    service_mappings={
+                        "dataselect": self.ws_dataselect_url,
+                        "station": self.ws_station_url,
+                    },
+                )
 
             # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
             if self.sds:
@@ -708,6 +785,17 @@ class EventFetcher(object):
             self.event.id,
             dist_km,
         )
+
+        if not self.trace_client: 
+            self.trace_client = Client(
+                debug=self.fdsn_debug,
+                base_url=self.base_url,
+                service_mappings={
+                    "dataselect": self.ws_dataselect_url,
+                    "station": self.ws_station_url,
+                },
+            )
+
         try:
             inventory = self.trace_client.get_stations(
                 starttime=t0,
@@ -721,14 +809,15 @@ class EventFetcher(object):
             )
         except Exception as e:
             logger.error(
-                "(get_event_waveforms_id_within_distance)%s %s", e, self.event.id
+                "(get_event_waveforms_id_within_distance) %s %s", e, self.event.id
             )
             return []
 
         waveforms_id = []
         for net in inventory:
             for sta in net:
-                for chan in sta.select(channel="[SHE]HZ"):
+                # fixme: get data with the higher sampling rate only
+                for chan in sta.select(channel="[SBHE]HZ"):
                     wf_id = ".".join(
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
@@ -802,7 +891,8 @@ class EventFetcher(object):
 def _test():
     # webservice URL
     ws_base_url = "http://10.0.1.36"
-    ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1"
+    # ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1"
+    ws_event_url = "http://10.0.1.36:8080/fdsnws/event/1"
     ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1"
     ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1"
 
@@ -812,18 +902,28 @@ def _test():
     # ws_dataselect_url = "http://ws.resif.fr/fdsnws/dataselect/1"
 
     # event
-    event_id = "fr2022jjdzbt"
+    # event_id = "fr2022jjdzbt"
+    event_id = "eost2023oelngypu"
 
     # get data
     mydata = EventFetcher(
         event_id,
+        time_length=90,
+        starttime_offset=-10,
+        station_max_dist_km=200,
         base_url=ws_base_url,
         ws_event_url=ws_event_url,
         ws_station_url=ws_station_url,
         ws_dataselect_url=ws_dataselect_url,
-        enable_read_cache=False,
-        enable_write_cache=False,
-        fdsn_debug=False,
+        use_only_trace_with_weighted_arrival=False,
+        keep_only_3channels_station=True,
+        enable_RTrotation=False,
+        backup_dirname=event_id,
+        enable_write_cache=True,
+        enable_read_cache=True,
+        # write_cache_format="mseed",
+        write_cache_format="phasenet",
+        log_level=logging.INFO,
     )
 
     if not mydata.st:
