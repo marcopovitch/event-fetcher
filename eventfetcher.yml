@@ -1,0 +1,59 @@
+# Event id to get from fdsnws-event
+event_id: null
+
+# force start or end time or use time_length
+# starttime default is T0
+# endtime default is starttime + time_length
+starttime: null
+endtime: null
+time_length: 60
+
+# add extra time offset to starttime
+starttime_offset: 0
+
+# Get only traces with a pick used on them
+use_only_trace_with_weighted_arrival: True
+
+# ... or get all stations within this radius from epicenter
+station_max_dist_km: null
+
+# list of black listed waveform ids ["NET.STA.LOC.CHAN", ... ]
+black_listed_waveforms_id: null
+
+# get only this waveforn id "NET.STA.LOC.CHAN"
+waveforms_id: null
+
+# Get rid off stations with only one vertical channel
+keep_only_3channels_station: False
+
+# to get Z,R,T channels
+enable_RTrotation: False
+
+# hack: to export data in mseed data format
+# or phasenet files (mseed + needed files)
+# enable write cache with write_cache_format as "mseed" or "phasenet""
+# (default is pickle)
+output:
+  backup_dirname: "."
+  enable_read_cache: False
+  enable_write_cache: True
+  write_cache_format: mseed
+
+fdsnws:
+  # RESIF with custom service mappings
+  base_url: "http://ws.resif.fr"
+  ws_event_url: "https://api.franceseisme.fr/fdsnws/event/1/"
+  ws_station_url: "http://ws.resif.fr/fdsnws/station/1/"
+  ws_dataselect_url: "http://ws.resif.fr/fdsnws/dataselect/1"
+  #
+  #base_url: "http://10.0.1.36"
+  #ws_event_url: "http://10.0.1.36:8080/fdsnws/event/1/"
+  #ws_event_url: "https://api.franceseisme.fr/fdsnws/event/1/"
+  #ws_station_url: "http://10.0.1.36:8080/fdsnws/station/1/"
+  #ws_dataselect_url: "http://10.0.1.36:8080/fdsnws/dataselect/1/"
+  #
+  fdsn_debug: False
+
+# if defined take precedence to ws_dataselect_url
+#sds: "/miniseed"
+sds: null

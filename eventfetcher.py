@@ -6,6 +6,8 @@ import re
 import sys
 import warnings
 import numpy as np
+import argparse
+import yaml
 
 from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
@@ -104,7 +106,7 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
 
 
 def filter_out_station_by_distance(
-    waveforms_id, bulk, inventory, latitude, longitude, station_max_dist_km
+    waveforms_id, bulk, inventory, event, station_max_dist_km
 ):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
@@ -114,14 +116,14 @@ def filter_out_station_by_distance(
         try:
             coord = inventory.get_coordinates(w, t)
         except Exception as e:
-            logger.error(e)
+            logger.error("[%s] %s (%s, %s): %s", event.id, w, t1, t2, e)
             continue
 
         distance, az, baz = gps2dist_azimuth(
             coord["latitude"],
             coord["longitude"],
-            latitude,
-            longitude,
+            event.latitude,
+            event.longitude,
         )
         # distance in meters, convert it to km
         distance = distance / 1000.0
@@ -435,7 +437,7 @@ class EventFetcher(object):
             # set FDSN clients
             # configuring 3 differents urls doesn't work.
             # we have to split in 2 Fdsn clients trace and event
-            if not self.trace_client: 
+            if not self.trace_client:
                 self.trace_client = Client(
                     debug=self.fdsn_debug,
                     base_url=self.base_url,
@@ -532,8 +534,7 @@ class EventFetcher(object):
                 self.waveforms_id,
                 bulk,
                 inventory,
-                self.event.latitude,
-                self.event.longitude,
+                self.event,
                 self.station_max_dist_km,
             )
 
@@ -786,7 +787,7 @@ class EventFetcher(object):
             dist_km,
         )
 
-        if not self.trace_client: 
+        if not self.trace_client:
             self.trace_client = Client(
                 debug=self.fdsn_debug,
                 base_url=self.base_url,
@@ -888,22 +889,12 @@ class EventFetcher(object):
                     break
 
 
-def _test():
+def _test(event_id):
     # webservice URL
     ws_base_url = "http://10.0.1.36"
-    # ws_event_url = "https://api.franceseisme.fr/fdsnws/event/1"
     ws_event_url = "http://10.0.1.36:8080/fdsnws/event/1"
     ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1"
     ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1"
-
-    # ws_base_url = "http://ws.resif.fr"
-    # ws_event_url = "https://ws.resif.fr/fdsnws/event/1"
-    # ws_station_url = "http://ws.resif.fr/fdsnws/station/1"
-    # ws_dataselect_url = "http://ws.resif.fr/fdsnws/dataselect/1"
-
-    # event
-    # event_id = "fr2022jjdzbt"
-    event_id = "eost2023oelngypu"
 
     # get data
     mydata = EventFetcher(
@@ -921,7 +912,6 @@ def _test():
         backup_dirname=event_id,
         enable_write_cache=True,
         enable_read_cache=True,
-        # write_cache_format="mseed",
         write_cache_format="phasenet",
         log_level=logging.INFO,
     )
@@ -932,6 +922,102 @@ def _test():
         logger.info(mydata.st.__str__(extended=True))
 
 
+def _get_data(conf, event_id=None):
+    if not event_id:
+        event_id = conf.event_id
+
+    if not event_id:
+        logger.error("eventid must be set (in yaml file or using option -e eventid) !")
+        sys.exit(255)
+
+    numeric_level = getattr(logging, args.loglevel.upper(), None)
+    if not numeric_level:
+        logger.error("Invalid loglevel '%s' !", args.loglevel.upper())
+        logger.error("loglevel should be: debug,warning,info,error.")
+        sys.exit(255)
+
+    mydata = EventFetcher(
+        event_id,
+        starttime=conf["starttime"],
+        endtime=conf["endtime"],
+        time_length=conf["time_length"],
+        starttime_offset=conf["starttime_offset"],
+        station_max_dist_km=conf["station_max_dist_km"],
+        #
+        black_listed_waveforms_id=conf["black_listed_waveforms_id"],
+        waveforms_id=conf["waveforms_id"],
+        #
+        sds=conf["sds"],
+        base_url=conf["fdsnws"]["base_url"],
+        ws_event_url=conf["fdsnws"]["ws_event_url"],
+        ws_station_url=conf["fdsnws"]["ws_station_url"],
+        ws_dataselect_url=conf["fdsnws"]["ws_dataselect_url"],
+        fdsn_debug=conf["fdsnws"]["fdsn_debug"],
+        #
+        use_only_trace_with_weighted_arrival=conf[
+            "use_only_trace_with_weighted_arrival"
+        ],
+        keep_only_3channels_station=conf["keep_only_3channels_station"],
+        enable_RTrotation=conf["enable_RTrotation"],
+        backup_dirname=event_id,
+        enable_write_cache=conf["output"]["enable_write_cache"],
+        enable_read_cache=conf["output"]["enable_read_cache"],
+        write_cache_format=conf["output"]["write_cache_format"],
+        log_level=numeric_level,
+    )
+
+    if not mydata.st:
+        logger.info("No data associated to event %s", event_id)
+    else:
+        logger.info(mydata.st.__str__(extended=True))
+
+
+def load_config(conf_file):
+    with open(conf_file, "r") as stream:
+        try:
+            conf = yaml.safe_load(stream)
+        except yaml.YAMLError as e:
+            logger.error(e)
+            conf = None
+    return conf
+
+
 if __name__ == "__main__":
     logger.setLevel(logging.INFO)
-    _test()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-c",
+        "--conf",
+        default=None,
+        dest="conf_file",
+        help="eventfetcher configuration file.",
+        type=str,
+    )
+    parser.add_argument(
+        "-e",
+        "--eventid",
+        default=None,
+        dest="eventid",
+        help="event id",
+        type=str,
+    )
+    parser.add_argument(
+        "-l",
+        "--loglevel",
+        default="INFO",
+        dest="loglevel",
+        help="loglevel (debug,warning,info,error)",
+        type=str,
+    )
+    args = parser.parse_args()
+
+    if not args.eventid:
+        parser.print_help()
+        sys.exit(255)
+
+    conf = load_config(args.conf_file)
+    if not conf:
+        sys.exit()
+
+    _get_data(conf, args.eventid)
