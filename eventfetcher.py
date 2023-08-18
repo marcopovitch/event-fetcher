@@ -207,6 +207,9 @@ class EventInfo(object):
     - latitude
     - longitude
     - T0
+    - magnitude
+    - magnitude_type
+    - event_type
     - qml
     """
 
@@ -216,8 +219,18 @@ class EventInfo(object):
         self.longitude = None
         self.depth = None
         self.T0 = None
+        self.magnitude = None
+        self.magnitude_type = None
         self.event_type = None
         self.qml = None
+
+    def __str__(self):
+        mystr = (
+            f"event_id={self.id}, {self.event_type}\n"
+            f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
+            f"magnitude={self.magnitude:.2f} {self.magnitude_type}"
+        )
+        return mystr
 
 
 class EventFetcher(object):
@@ -391,6 +404,9 @@ class EventFetcher(object):
         ) = self.get_event_coordinates(self.event.qml)
         self.event.T0 = self.get_event_time(self.event.qml)
         self.event.event_type = self.get_event_type(self.event.qml)
+        self.event.magnitude = self.get_magnitude(self.event.qml)
+        self.event.magnitude_type = self.get_magnitude_type(self.event.qml)
+        logger.debug(self.event)
 
         if waveforms_id:
             self.waveforms_id = waveforms_id
@@ -756,6 +772,18 @@ class EventFetcher(object):
     def get_event_type(self, e):
         return e.event_type
 
+    def get_magnitude(self, e):
+        if len(e.magnitudes):
+            return e.magnitudes[0].mag
+        else:
+            return None
+
+    def get_magnitude_type(self, e):
+        if len(e.magnitudes):
+            return e.magnitudes[0].magnitude_type
+        else:
+            return None
+
     def get_event_waveforms_id(self, e):
         waveforms_id = []
         o = e.preferred_origin()
@@ -969,6 +997,7 @@ def _get_data(conf, event_id=None):
     if not mydata.st:
         logger.info("No data associated to event %s", event_id)
     else:
+        logger.info(mydata.event)
         logger.info(mydata.st.__str__(extended=True))
 
 
