@@ -8,5 +8,6 @@ setup(
     version="1.1",
     install_requires=[
         "obspy >= 1.4.0",
+        "pyyaml",
     ],
 )
