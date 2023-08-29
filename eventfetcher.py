@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import argparse
 import yaml
+import urllib.parse
 
 from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
@@ -295,7 +296,9 @@ class EventFetcher(object):
                 self.event = EventInfo()
                 return
 
-        self.backup_event_file = os.path.join(backup_dirname, "{}.qml".format(event_id))
+        self.backup_event_file = os.path.join(
+            backup_dirname, f"{urllib.parse.quote(event_id, safe='')}.qml"
+        )
         self.backup_traces_file = os.path.join(backup_dirname, "waveforms")
 
         if black_listed_waveforms_id:
@@ -952,7 +955,9 @@ def _test(event_id):
 
 def _get_data(conf, event_id=None):
     if not event_id:
-        event_id = conf.event_id
+        event_id = urllib.parse.quote(conf.event_id, safe="")
+    else:
+        event_id = urllib.parse.quote(event_id, safe="")
 
     if not event_id:
         logger.error("eventid must be set (in yaml file or using option -e eventid) !")
@@ -965,7 +970,7 @@ def _get_data(conf, event_id=None):
         sys.exit(255)
 
     mydata = EventFetcher(
-        event_id,
+        urllib.parse.unquote(event_id),
         starttime=conf["starttime"],
         endtime=conf["endtime"],
         time_length=conf["time_length"],
