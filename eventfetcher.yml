@@ -40,19 +40,32 @@ output:
   write_cache_format: mseed
 
 fdsnws:
-  # RESIF with custom service mappings
-  base_url: "http://ws.resif.fr"
-  ws_event_url: "https://api.franceseisme.fr/fdsnws/event/1/"
-  ws_station_url: "http://ws.resif.fr/fdsnws/station/1/"
-  ws_dataselect_url: "http://ws.resif.fr/fdsnws/dataselect/1"
-  #
-  #base_url: "http://10.0.1.36"
-  #ws_event_url: "http://10.0.1.36:8080/fdsnws/event/1/"
-  #ws_event_url: "https://api.franceseisme.fr/fdsnws/event/1/"
-  #ws_station_url: "http://10.0.1.36:8080/fdsnws/station/1/"
-  #ws_dataselect_url: "http://10.0.1.36:8080/fdsnws/dataselect/1/"
-  #
   fdsn_debug: False
+  default_url_mapping: seiscomp
+  url_mapping:
+    franceseisme:
+      ws_base_url: http://10.0.1.36
+      ws_event_url: https://api.franceseisme.fr/fdsnws/event/1/
+      ws_station_url: http://10.0.1.36:8080/fdsnws/station/1/
+      ws_dataselect_url: http://10.0.1.36:8080/fdsnws/dataselect/1/
+
+    seiscomp:
+      ws_base_url: http://10.0.1.36
+      ws_event_url: http://10.0.1.36:8080/fdsnws/event/1/
+      ws_station_url: http://10.0.1.36:8080/fdsnws/station/1/
+      ws_dataselect_url: http://10.0.1.36:8080/fdsnws/dataselect/1/
+
+    resif:
+      base_url: http://ws.resif.fr
+      ws_event_url: https://api.franceseisme.fr/fdsnws/event/1/
+      ws_station_url: http://ws.resif.fr/fdsnws/station/1/
+      ws_dataselect_url: http://ws.resif.fr/fdsnws/dataselect/1
+
+    localhost:
+      ws_base_url: http://127.0.0.1:10003
+      ws_event_url: http://127.0.0.1:10003/fdsnws/event/1
+      ws_station_url: http://127.0.0.1:10003/fdsnws/station/1
+      ws_dataselect_url: http://10.0.1.36:8080/fdsnws/dataselect/1/
 
 # if defined take precedence to ws_dataselect_url
 #sds: "/miniseed"

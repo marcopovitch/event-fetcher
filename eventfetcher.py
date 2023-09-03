@@ -226,11 +226,15 @@ class EventInfo(object):
         self.qml = None
 
     def __str__(self):
-        mystr = (
-            f"event_id={self.id}, {self.event_type}\n"
-            f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
-            f"magnitude={self.magnitude:.2f} {self.magnitude_type}"
-        )
+        try:
+            mystr = (
+                f"event_id={self.id}, {self.event_type}\n"
+                f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
+                f"magnitude={self.magnitude:.2f} {self.magnitude_type}"
+            )
+        except Exception as e:
+            logger.error(self.__dict__)
+            mystr = ""
         return mystr
 
 
@@ -953,11 +957,30 @@ def _test(event_id):
         logger.info(mydata.st.__str__(extended=True))
 
 
-def _get_data(conf, event_id=None):
+def _get_data(conf, event_id=None, fdsn_profile=None):
+    # force eventid_id
     if not event_id:
         event_id = urllib.parse.quote(conf.event_id, safe="")
     else:
         event_id = urllib.parse.quote(event_id, safe="")
+
+    # force fdsn ws
+    fdsnws_cfg = conf["fdsnws"]
+    if not fdsn_profile:
+        default_url_mapping = fdsnws_cfg["default_url_mapping"]
+    else:
+        default_url_mapping = fdsn_profile
+    fdsn_debug = fdsnws_cfg["fdsn_debug"]
+    url_mapping = fdsnws_cfg["url_mapping"]
+
+    if default_url_mapping not in fdsnws_cfg["url_mapping"]:
+        logger.error("unknown fdsn profile '%s'. Exiting !", default_url_mapping)
+        sys.exit(255)
+
+    ws_base_url = url_mapping[default_url_mapping]["ws_base_url"]
+    ws_event_url = url_mapping[default_url_mapping]["ws_event_url"]
+    ws_station_url = url_mapping[default_url_mapping]["ws_station_url"]
+    ws_dataselect_url = url_mapping[default_url_mapping]["ws_dataselect_url"]
 
     if not event_id:
         logger.error("eventid must be set (in yaml file or using option -e eventid) !")
@@ -981,11 +1004,11 @@ def _get_data(conf, event_id=None):
         waveforms_id=conf["waveforms_id"],
         #
         sds=conf["sds"],
-        base_url=conf["fdsnws"]["base_url"],
-        ws_event_url=conf["fdsnws"]["ws_event_url"],
-        ws_station_url=conf["fdsnws"]["ws_station_url"],
-        ws_dataselect_url=conf["fdsnws"]["ws_dataselect_url"],
-        fdsn_debug=conf["fdsnws"]["fdsn_debug"],
+        base_url=ws_base_url,
+        ws_event_url=ws_event_url,
+        ws_station_url=ws_station_url,
+        ws_dataselect_url=ws_dataselect_url,
+        fdsn_debug=fdsn_debug,
         #
         use_only_trace_with_weighted_arrival=conf[
             "use_only_trace_with_weighted_arrival"
@@ -1037,6 +1060,14 @@ if __name__ == "__main__":
         type=str,
     )
     parser.add_argument(
+        "-f",
+        "--fdsn-profile",
+        default=None,
+        dest="fdsn_profile",
+        help="fdsn profile",
+        type=str,
+    )
+    parser.add_argument(
         "-l",
         "--loglevel",
         default="INFO",
@@ -1054,4 +1085,4 @@ if __name__ == "__main__":
     if not conf:
         sys.exit()
 
-    _get_data(conf, args.eventid)
+    _get_data(conf, args.eventid, args.fdsn_profile)
