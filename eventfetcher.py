@@ -34,6 +34,7 @@ def phasenet_dump(traces, directory):
         wfids.add(".".join(tr.id.split(".")[:3]))
     wfids = list(map(lambda x: x + ".*", wfids))
 
+
     for wfid in wfids:
         net_sta_loc = ".".join(wfid.split(".")[:3])
         st = traces.select(id=wfid)
@@ -45,6 +46,7 @@ def phasenet_dump(traces, directory):
 
     # generates chan.txt for dbclust
     chantxt_filename = os.path.join(directory, "chan.txt")
+    logger.debug(f"Generating {chantxt_filename}")
     with open(chantxt_filename, "w") as fp:
         for wfid in wfids:
             st = traces.select(id=wfid).sort(["channel"], reverse=True)
@@ -54,17 +56,24 @@ def phasenet_dump(traces, directory):
 
     # generates csv file
     csv_filename = os.path.join(directory, "fname.csv")
+    logger.debug(f"Generating {csv_filename}")
     with open(csv_filename, "w") as fp:
         fp.write("fname,E,N,Z\n")
         for wfid in wfids:
             filename = ".".join(wfid.split(".")[:3]) + ".mseed"
+            logger.debug(filename)
             st = traces.select(id=wfid)
+            logger.debug(st)
             Z_trace = st.select(component="Z")[0]
             st.remove(Z_trace)
             st.sort(["channel"], reverse=False)
-            fp.write(
-                f"{filename},{st[0].stats.channel},{st[1].stats.channel},{Z_trace.stats.channel}\n"
-            )
+            try:
+                fp.write(
+                    f"{filename},{st[0].stats.channel},{st[1].stats.channel},{Z_trace.stats.channel}\n"
+                )
+            except Exception as e:
+                logger.error(f"Something went wrong getting 3 components in {wfid}:")
+                logger.error(st)
 
 
 def mseed_dump(traces, directory):
@@ -424,11 +433,13 @@ class EventFetcher(object):
             )
 
             if self.use_only_trace_with_weighted_arrival:
+                logger.debug("Using: get_event_waveforms_id")
                 self.waveforms_id = self._hack_streams(
                     self.get_event_waveforms_id(self.event.qml)
                 )
                 self.show_pick_offet(self.event.qml)
             else:
+                logger.debug("Using: get_event_waveforms_id_within_distance")
                 self.waveforms_id = self._hack_streams(
                     self.get_event_waveforms_id_within_distance(
                         self.event.qml, self.station_max_dist_km
@@ -495,26 +506,29 @@ class EventFetcher(object):
             self.endtime = self.starttime + self.time_length
 
     def _hack_P_stream(self, waveforms_id):
-        waveforms_id = re.sub(r"-$", "?", waveforms_id)
-
-        waveforms_id = re.sub(r"\.HH$", ".HHZ", waveforms_id)
-        waveforms_id = re.sub(r"\.EL$", ".ELZ", waveforms_id)
-        waveforms_id = re.sub(r"\.HN$", ".HNZ", waveforms_id)
-
-        waveforms_id = re.sub("H.?$", "HZ", waveforms_id)
-        waveforms_id = re.sub("L.?$", "LZ", waveforms_id)
-        waveforms_id = re.sub("N.?$", "NZ", waveforms_id)
-        # waveforms_id = re.sub("N.?$", "NZ", waveforms_id)
-        return waveforms_id
-
-    def _hack_streams(self, waveforms_id):
         """Hack to get rid off sc3 users mislabeling phases."""
-        waveforms_id = [re.sub("H.?$", "H?", s) for s in waveforms_id]
-        waveforms_id = [re.sub("L.?$", "L?", s) for s in waveforms_id]
-        waveforms_id = [re.sub("N.?$", "N?", s) for s in waveforms_id]
-        # remove multiple same occurence
-        waveforms_id = set(waveforms_id)
+        net, sta, loc, chan = waveforms_id.split(".")
+        if len(chan) == 3:
+            if chan[-1] == '-' or chan[-1] == '?':
+                chan = chan[:2] + 'Z'
+                return ".".join([net, sta, loc, chan])
+
+        if len(chan) == 2:
+            # eg: RT.MTT2..BH
+            chan = chan + 'Z'
+            return ".".join([net, sta, loc, chan])
+
         return waveforms_id
+
+    def _hack_streams(self, waveforms_ids):
+        """Hack to get rid off sc3 users mislabeling phases."""
+        wfid_list = set()
+        for w in waveforms_ids:
+            w_fixed = self._hack_P_stream(w)
+            net, sta, loc, chan = w_fixed.split(".")
+            chan = chan[:2] + '?'
+            wfid_list.add(".".join([net, sta, loc, chan]))
+        return list(wfid_list)
 
     def _remove_from_stream(self, waveforms_id_list):
         # remove black listed waveform_id
@@ -535,6 +549,7 @@ class EventFetcher(object):
         logger.debug(f"{self.event.id}: getting inventory ...")
         bulk = []
         for w in self.waveforms_id:
+            logger.debug(f"get_trace_bulk requesting inventory for {w}")
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
 
@@ -852,8 +867,8 @@ class EventFetcher(object):
         waveforms_id = []
         for net in inventory:
             for sta in net:
-                # fixme: get data with the higher sampling rate only
-                for chan in sta.select(channel="[SBHE]HZ"):
+                # FIXME: get data with the higher sampling rate only
+                for chan in sta.select(channel="[SBHED][HNP]Z"):
                     wf_id = ".".join(
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
