@@ -61,9 +61,7 @@ def phasenet_dump(traces, directory):
         fp.write("fname,E,N,Z\n")
         for wfid in wfids:
             filename = ".".join(wfid.split(".")[:3]) + ".mseed"
-            logger.debug(filename)
             st = traces.select(id=wfid)
-            logger.debug(st)
             Z_trace = st.select(component="Z")[0]
             st.remove(Z_trace)
             st.sort(["channel"], reverse=False)
