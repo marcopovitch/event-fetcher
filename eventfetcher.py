@@ -22,6 +22,7 @@ logger.setLevel(logging.INFO)
 
 
 def phasenet_dump(traces, directory):
+    logger.info("PhaseNet dump:")
     try:
         os.makedirs(directory, exist_ok=True)
         logger.debug("Directory '%s' created successfully." % directory)
@@ -33,7 +34,6 @@ def phasenet_dump(traces, directory):
     for tr in traces:
         wfids.add(".".join(tr.id.split(".")[:3]))
     wfids = list(map(lambda x: x + ".*", wfids))
-
 
     for wfid in wfids:
         net_sta_loc = ".".join(wfid.split(".")[:3])
@@ -75,6 +75,7 @@ def phasenet_dump(traces, directory):
 
 
 def mseed_dump(traces, directory):
+    logger.info("Mseed dump:")
     try:
         os.makedirs(directory, exist_ok=True)
         logger.debug("Directory '%s' created successfully." % directory)
@@ -507,13 +508,13 @@ class EventFetcher(object):
         """Hack to get rid off sc3 users mislabeling phases."""
         net, sta, loc, chan = waveforms_id.split(".")
         if len(chan) == 3:
-            if chan[-1] == '-' or chan[-1] == '?':
-                chan = chan[:2] + 'Z'
+            if chan[-1] == "-" or chan[-1] == "?":
+                chan = chan[:2] + "Z"
                 return ".".join([net, sta, loc, chan])
 
         if len(chan) == 2:
             # eg: RT.MTT2..BH
-            chan = chan + 'Z'
+            chan = chan + "Z"
             return ".".join([net, sta, loc, chan])
 
         return waveforms_id
@@ -524,7 +525,7 @@ class EventFetcher(object):
         for w in waveforms_ids:
             w_fixed = self._hack_P_stream(w)
             net, sta, loc, chan = w_fixed.split(".")
-            chan = chan[:2] + '?'
+            chan = chan[:2] + "?"
             wfid_list.add(".".join([net, sta, loc, chan]))
         return list(wfid_list)
 
@@ -743,9 +744,10 @@ class EventFetcher(object):
                 #    raise
                 st.rotate(method="->ZNE", inventory=inventory)
                 st.rotate(method="NE->RT", inventory=inventory)
+            except IndexError:
+                logger.warning("(%s) Can't rotate: %s (no data !)", self.event.id, wid)
             except Exception as e:
                 logger.warning("(%s) Can't rotate: %s (%s)", self.event.id, wid, e)
-                # logger.warning(st)
             else:
                 # logger.warning(st)
                 # remove Z trace
