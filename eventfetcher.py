@@ -9,6 +9,8 @@ import numpy as np
 import argparse
 import yaml
 import urllib.parse
+import urllib.error
+
 
 from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
@@ -320,7 +322,13 @@ class EventFetcher(object):
 
         self.event = EventInfo()
         self.event.id = event_id
-        self._fetch_data(waveforms_id=waveforms_id)
+        try:
+            self._fetch_data(waveforms_id=waveforms_id)
+        except Exception as e:
+            logger.error(f"Can't get traces for event_id {event_id}")
+            logger.error(e)
+            self.st = [] 
+            return 
 
         self.get_picks()
         if self.st == []:
@@ -486,7 +494,10 @@ class EventFetcher(object):
 
             logger.debug("Fetching traces (%s) from FDSN-WS or SDS", self.event.id)
             # self.st = self.get_trace(self.starttime, self.endtime)
-            self.st = self.get_trace_bulk(self.starttime, self.endtime)
+            try:
+                self.st = self.get_trace_bulk(self.starttime, self.endtime)
+            except urllib.error.HTTPError as e:
+                raise e
 
         # remove black listed channels
         # to be optimized (at inventory level if possible)
@@ -586,8 +597,10 @@ class EventFetcher(object):
                     bulk, attach_response=False
                 )
         except Exception as e:
-            logger.error("%s %s", e, self.event.id)
-            return Stream()
+            #logger.error("%s %s", e, self.event.id)
+            #logger.error(e.status_code)
+            raise e
+            #return Stream()
 
         # merge multiple segments if any
         try:
