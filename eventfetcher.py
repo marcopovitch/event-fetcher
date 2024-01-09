@@ -10,6 +10,7 @@ import argparse
 import yaml
 import urllib.parse
 import urllib.error
+from icecream import ic
 
 
 from obspy import Stream, read_events, UTCDateTime
@@ -96,10 +97,8 @@ def mseed_dump(traces, directory):
 def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
-        inv = inventory.select(
-            network=net, station=sta, location=loc, time=t1 + (t2 - t1) / 2.0
-        )
-        # channels = inv[0][0]
+        rqt_time = t1 + (t2 - t1) / 2.0
+        inv = inventory.select(network=net, station=sta, location=loc, time=rqt_time)
         if inv and len(inv[0][0]) == 3:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
@@ -110,7 +109,9 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
                     % (txt, w, len(inv[0][0]))
                 )
             else:
-                logger.warning("[%s] Filtering out %s (no metadata)" % (txt, w))
+                logger.warning(
+                    "[%s] Filtering out %s (no metadata at %s)" % (txt, w, rqt_time)
+                )
             id = ".".join((net, sta, loc, chan))
             waveforms_id = cleanup_waveforms_id(waveforms_id, id)
     return waveforms_id, tmp_bulk
@@ -327,8 +328,8 @@ class EventFetcher(object):
         except Exception as e:
             logger.error(f"Can't get traces for event_id {event_id}")
             logger.error(e)
-            self.st = [] 
-            return 
+            self.st = []
+            return
 
         self.get_picks()
         if self.st == []:
@@ -501,7 +502,7 @@ class EventFetcher(object):
 
         # remove black listed channels
         # to be optimized (at inventory level if possible)
-        self._remove_from_stream(self.black_listed_waveforms_id)
+        # self._remove_from_stream(self.black_listed_waveforms_id)
 
         if self.st == []:
             logger.warning("No traces (%s)!" % self.event.id)
@@ -543,8 +544,10 @@ class EventFetcher(object):
     def _remove_from_stream(self, waveforms_id_list):
         # remove black listed waveform_id
         # should be optimized (to be done at the inventory level, if possible)
-        for net, sta, loc, chan in waveforms_id_list:
-            wfid = f"{net}.{sta}.{loc}.{chan}"
+        # for net, sta, loc, chan in waveforms_id_list:
+        #   wfid = f"{net}.{sta}.{loc}.{chan}"
+        for wfid in waveforms_id_list:
+            net, sta, loc, chan = wfid.split(".")
             for tr in self.st.select(
                 network=net, station=sta, location=loc, channel=chan
             ):
@@ -559,6 +562,9 @@ class EventFetcher(object):
         logger.debug(f"{self.event.id}: getting inventory ...")
         bulk = []
         for w in self.waveforms_id:
+            if w in self.black_listed_waveforms_id:
+                logger.info(f"Ignoring {w}: black listed !")
+                continue
             logger.debug(f"get_trace_bulk requesting inventory for {w}")
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
@@ -597,10 +603,10 @@ class EventFetcher(object):
                     bulk, attach_response=False
                 )
         except Exception as e:
-            #logger.error("%s %s", e, self.event.id)
-            #logger.error(e.status_code)
+            # logger.error("%s %s", e, self.event.id)
+            # logger.error(e.status_code)
             raise e
-            #return Stream()
+            # return Stream()
 
         # merge multiple segments if any
         try:
@@ -1020,6 +1026,10 @@ def _get_data(conf, event_id=None, fdsn_profile=None):
         logger.error("loglevel should be: debug,warning,info,error.")
         sys.exit(255)
 
+    output_dirname = os.path.join(conf["output"]["backup_dirname"], event_id)
+
+    #ic(conf["black_listed_waveforms_id"])
+
     mydata = EventFetcher(
         urllib.parse.unquote(event_id),
         starttime=conf["starttime"],
@@ -1043,7 +1053,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None):
         ],
         keep_only_3channels_station=conf["keep_only_3channels_station"],
         enable_RTrotation=conf["enable_RTrotation"],
-        backup_dirname=event_id,
+        backup_dirname=output_dirname,
         enable_write_cache=conf["output"]["enable_write_cache"],
         enable_read_cache=conf["output"]["enable_read_cache"],
         write_cache_format=conf["output"]["write_cache_format"],
