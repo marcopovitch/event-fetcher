@@ -10,9 +10,10 @@ import argparse
 import yaml
 import urllib.parse
 import urllib.error
+import pandas as pd
 from icecream import ic
 
-
+from obspy import Inventory
 from obspy import Stream, read_events, UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
@@ -77,7 +78,7 @@ def phasenet_dump(traces, directory):
                 logger.error(st)
 
 
-def mseed_dump(traces, directory):
+def mseed_dump(traces, directory, station_json=False):
     logger.info("Mseed dump:")
     try:
         os.makedirs(directory, exist_ok=True)
@@ -93,13 +94,92 @@ def mseed_dump(traces, directory):
         )
         tr.write(filename, format="MSEED")
 
+    # generates json station file
+    if station_json:
+        pass
+
+
+def inventory2df(inventory: Inventory) -> pd.DataFrame:
+    """Convert inventory to dataframe
+
+    Args:
+        inventory (Inventory): inventory to convert
+
+    Returns:
+        pd.DataFrame: dataframe
+    """
+    channels_info = []
+    for network in inventory:
+        for station in network:
+            for channel in station.channels:
+
+                if channel.response and channel.response.instrument_sensitivity:
+                    scale = channel.response.instrument_sensitivity.value
+                    scale_freq = channel.response.instrument_sensitivity.frequency
+                    scale_units = channel.response.instrument_sensitivity.input_units
+                else:
+                    scale = scale_freq = scale_units = None
+
+                if channel.sensor:
+                    sensor_description = channel.sensor.description
+                else:
+                    sensor_description = None
+
+                channel_info = {
+                    "Network": network.code,
+                    "Station": station.code,
+                    "Location": channel.location_code,
+                    "Channel": channel.code,
+                    "Latitude": station.latitude,
+                    "Longitude": station.longitude,
+                    "Elevation": station.elevation,
+                    "Depth": channel.depth,
+                    # "Azimuth": channel.azimuth,
+                    # "Dip": channel.dip,
+                    # "SensorDescription": sensor_description,
+                    # "Scale": scale,
+                    # "ScaleFreq": scale_freq,
+                    # "ScaleUnits": scale_units,
+                    "SampleRate": channel.sample_rate,
+                    "StartTime": station.start_date,
+                    "EndTime": station.end_date,
+                }
+                # Add channel information to the list
+                channels_info.append(channel_info)
+
+    # Create a pandas DataFrame from the list of dictionaries
+    df = pd.DataFrame(channels_info, dtype=str)
+    if df.empty:
+        return df
+
+    df["SampleRate"] = df["SampleRate"].apply(np.float32)
+    df = df.fillna("")
+    df["Latitude"] = df["Latitude"].apply(np.float32)
+    df["Longitude"] = df["Longitude"].apply(np.float32)
+    df["Elevation"] = df["Elevation"].apply(np.float32)
+    df["Location"] = df["Location"].astype(str)
+    df["Channel"] = df["Channel"].astype(str)
+
+    df = df.drop_duplicates()
+
+    return df
+
 
 def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
         rqt_time = t1 + (t2 - t1) / 2.0
         inv = inventory.select(network=net, station=sta, location=loc, time=rqt_time)
-        if inv and len(inv[0][0]) == 3:
+
+        # limit only to channel with the highest sample rate
+        df = inventory2df(inv)
+        max_sample_rate = df["SampleRate"].max()
+        df = df[df["SampleRate"] == max_sample_rate]
+        df = df.sort_values(by="StartTime")[:3]
+        chan = df["Channel"].tolist()[0]
+        chan = chan[:2] + "?"
+
+        if len(df) == 3:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
             w = ".".join((net, sta, loc, chan))
@@ -1028,7 +1108,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None):
 
     output_dirname = os.path.join(conf["output"]["backup_dirname"], event_id)
 
-    #ic(conf["black_listed_waveforms_id"])
+    # ic(conf["black_listed_waveforms_id"])
 
     mydata = EventFetcher(
         urllib.parse.unquote(event_id),
