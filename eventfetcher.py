@@ -171,7 +171,7 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
         rqt_time = t1 + (t2 - t1) / 2.0
         inv = inventory.select(network=net, station=sta, location=loc, time=rqt_time)
 
-        # limit only to channel with the highest sample rate
+        # limits only to channels with the highest sample rate
         df = inventory2df(inv)
         max_sample_rate = df["SampleRate"].max()
         df = df[df["SampleRate"] == max_sample_rate]
