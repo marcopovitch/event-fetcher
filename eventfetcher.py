@@ -173,6 +173,10 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
 
         # limits only to channels with the highest sample rate
         df = inventory2df(inv)
+        if df.empty:
+            logger.error(f"No metadata for {net}.{sta}.{loc}.{chan}")
+            continue
+            
         max_sample_rate = df["SampleRate"].max()
         df = df[df["SampleRate"] == max_sample_rate]
         df = df.sort_values(by="StartTime")[:3]
@@ -407,7 +411,7 @@ class EventFetcher(object):
             self._fetch_data(waveforms_id=waveforms_id)
         except Exception as e:
             logger.error(f"Can't get traces for event_id {event_id}")
-            logger.error(e)
+            logger.error(f"error: {e}")
             self.st = []
             return
 
@@ -639,21 +643,24 @@ class EventFetcher(object):
                     logger.debug(f"Removed black listed trace fid {wfid}")
 
     def get_trace_bulk(self, starttime, endtime):
-        logger.debug(f"{self.event.id}: getting inventory ...")
+        logger.debug(f"{self.event.id}: building station list ...")
         bulk = []
         for w in self.waveforms_id:
-            if w in self.black_listed_waveforms_id:
-                logger.info(f"Ignoring {w}: black listed !")
+            # check if black listed using regex
+            if any(re.match(b, w) for b in self.black_listed_waveforms_id):
+                logger.info(f"{self.event.id}: ignoring black listed {w} !")
                 continue
-            logger.debug(f"get_trace_bulk requesting inventory for {w}")
+            
+            logger.debug(f"{self.event.id}: adding station {w}")
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
 
         # get inventory
+        logger.debug(f"{self.event.id}: getting station inventory ...")
         try:
             inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
-            logger.error("%s %s", e, self.event.id)
+            logger.error(f"{self.event.id}: {e}")
             return Stream()
 
         # keep only stations with 3 component (using inventory info only)
@@ -1071,7 +1078,7 @@ def _test(event_id):
         logger.info(mydata.st.__str__(extended=True))
 
 
-def _get_data(conf, event_id=None, fdsn_profile=None):
+def _get_data(conf, event_id=None, fdsn_profile=None) -> bool:
     # force eventid_id
     if not event_id:
         event_id = urllib.parse.quote(conf.event_id, safe="")
@@ -1108,8 +1115,6 @@ def _get_data(conf, event_id=None, fdsn_profile=None):
 
     output_dirname = os.path.join(conf["output"]["backup_dirname"], event_id)
 
-    # ic(conf["black_listed_waveforms_id"])
-
     mydata = EventFetcher(
         urllib.parse.unquote(event_id),
         starttime=conf["starttime"],
@@ -1142,9 +1147,11 @@ def _get_data(conf, event_id=None, fdsn_profile=None):
 
     if not mydata.st:
         logger.info("No data associated to event %s", event_id)
+        return False
     else:
         logger.info(mydata.event)
         logger.info(mydata.st.__str__(extended=True))
+        return True
 
 
 def load_config(conf_file):
@@ -1203,4 +1210,8 @@ if __name__ == "__main__":
     if not conf:
         sys.exit()
 
-    _get_data(conf, args.eventid, args.fdsn_profile)
+    retcode = _get_data(conf, args.eventid, args.fdsn_profile)
+    if not retcode:
+        sys.exit(1)
+    else:
+        sys.exit(0)
