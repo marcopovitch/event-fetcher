@@ -19,6 +19,8 @@ from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
+from denoise.denoise import denoise_stream, denoise_config_check
+
 # default logger
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
@@ -176,7 +178,7 @@ def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
         if df.empty:
             logger.error(f"No metadata for {net}.{sta}.{loc}.{chan}")
             continue
-            
+
         max_sample_rate = df["SampleRate"].max()
         df = df[df["SampleRate"] == max_sample_rate]
         df = df.sort_values(by="StartTime")[:3]
@@ -354,6 +356,7 @@ class EventFetcher(object):
         use_only_trace_with_weighted_arrival=True,
         keep_only_3channels_station=False,
         enable_RTrotation=False,
+        enable_denoising=False,
         backup_dirname=".",
         enable_read_cache=False,
         enable_write_cache=False,
@@ -371,6 +374,7 @@ class EventFetcher(object):
         self.use_only_trace_with_weighted_arrival = use_only_trace_with_weighted_arrival
         self.keep_only_3channels_station = keep_only_3channels_station
         self.enable_RTrotation = enable_RTrotation
+        self.enable_denoising = enable_denoising
         # cache
         self.enable_read_cache = enable_read_cache
         self.enable_write_cache = enable_write_cache
@@ -584,6 +588,10 @@ class EventFetcher(object):
             except urllib.error.HTTPError as e:
                 raise e
 
+        # model_name can be 'dae', 'original' or 'urban'.
+        self.st = denoise_stream(self.st, model_name="original")
+        print(self.st)
+
         # remove black listed channels
         # to be optimized (at inventory level if possible)
         # self._remove_from_stream(self.black_listed_waveforms_id)
@@ -650,7 +658,7 @@ class EventFetcher(object):
             if any(re.match(b, w) for b in self.black_listed_waveforms_id):
                 logger.info(f"{self.event.id}: ignoring black listed {w} !")
                 continue
-            
+
             logger.debug(f"{self.event.id}: adding station {w}")
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
@@ -1064,6 +1072,7 @@ def _test(event_id):
         ws_dataselect_url=ws_dataselect_url,
         use_only_trace_with_weighted_arrival=False,
         keep_only_3channels_station=True,
+        enable_denoising=False,
         enable_RTrotation=False,
         backup_dirname=event_id,
         enable_write_cache=True,
@@ -1138,6 +1147,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None) -> bool:
         ],
         keep_only_3channels_station=conf["keep_only_3channels_station"],
         enable_RTrotation=conf["enable_RTrotation"],
+        enable_denoising=conf["enable_denoising"],
         backup_dirname=output_dirname,
         enable_write_cache=conf["output"]["enable_write_cache"],
         enable_read_cache=conf["output"]["enable_read_cache"],
@@ -1176,6 +1186,8 @@ if __name__ == "__main__":
         help="eventfetcher configuration file.",
         type=str,
     )
+
+    # use eventid
     parser.add_argument(
         "-e",
         "--eventid",
@@ -1184,6 +1196,8 @@ if __name__ == "__main__":
         help="event id",
         type=str,
     )
+
+    # force fdsn profile
     parser.add_argument(
         "-f",
         "--fdsn-profile",
@@ -1192,6 +1206,18 @@ if __name__ == "__main__":
         help="fdsn profile",
         type=str,
     )
+
+    # force output directory
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        dest="output_dirname",
+        help="output directory",
+        type=str,
+    )
+
+    # set loglevel
     parser.add_argument(
         "-l",
         "--loglevel",
@@ -1200,15 +1226,44 @@ if __name__ == "__main__":
         help="loglevel (debug,warning,info,error)",
         type=str,
     )
+    # add denoise argument (default is False)
+    parser.add_argument(
+        "-d",
+        "--denoise",
+        default=False,
+        dest="denoise",
+        help="enable denoising",
+        action="store_true",
+    )
     args = parser.parse_args()
 
     if not args.eventid:
         parser.print_help()
         sys.exit(255)
 
+    # check only if model exist
+    if not denoise_config_check():
+        sys.exit(255)
+
     conf = load_config(args.conf_file)
     if not conf:
         sys.exit()
+
+    if args.output_dirname:
+        # check if output directory is empty
+        if os.path.isdir(args.output_dirname):
+            if os.listdir(args.output_dirname):
+                logger.error(
+                    "output directory '%s' is not empty !", args.output_dirname
+                )
+                sys.exit(255)
+
+        conf["output"]["backup_dirname"] = args.output_dirname
+
+    if args.denoise:
+        conf["enable_denoising"] = True
+    else:
+        conf["enable_denoising"] = False
 
     retcode = _get_data(conf, args.eventid, args.fdsn_profile)
     if not retcode:
