@@ -23,14 +23,17 @@ from obspy.geodetics import gps2dist_azimuth
 from keras.models import load_model
 import seisbench.models as sbm
 
+# Denoiser: https://github.com/JanisHe/seisDAE
+SEIS_DAE = "/Users/marc/github/seisDAE"
+sys.path.append(SEIS_DAE)
+from denoiser.denoise_utils import denoising_stream
+
 
 # default logger
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
-SEIS_DAE = "/Users/marc/github/seisDAE"
-sys.path.append(SEIS_DAE)
 MODEL = os.path.join(SEIS_DAE, "Models", "gr_mixed_stft.h5")
 CONFIG = os.path.join(SEIS_DAE, "config", "gr_mixed_stft.config")
 
