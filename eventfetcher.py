@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import os
 import _pickle as cPickle
 import logging
 import os.path
@@ -92,7 +93,15 @@ def phasenet_dump(traces, directory):
                 logger.error(st)
 
 
-def mseed_dump(traces, directory, station_json=False):
+def mseed_dump_by_trace(traces, directory, station_json=False):
+    """
+    Dump traces to MiniSEED files and optionally generate a JSON station file.
+
+    Args:
+        traces (list): List of traces to be dumped.
+        directory (str): Directory path where the MiniSEED files will be saved.
+        station_json (bool, optional): Whether to generate a JSON station file. Defaults to False.
+    """
     logger.info("Mseed dump:")
     try:
         os.makedirs(directory, exist_ok=True)
@@ -104,13 +113,48 @@ def mseed_dump(traces, directory, station_json=False):
         stats = tr.stats
         filename = os.path.join(
             directory,
-            f"{stats.network}.{stats.station}.{stats.location}.{stats.channel}.{stats.starttime}.{stats.endtime}.mseed",
+            f"{stats.network}.{stats.station}.{stats.location}.{stats.channel}.{stats.starttime}.{stats.endtime}",
         )
-        tr.write(filename, format="MSEED")
+        tr.write(filename + ".mseed", format="MSEED")
+        stats.response.write(filename + ".xml", format="STATIONXML")
 
     # generates json station file
     if station_json:
         pass
+
+
+def mseed_dump_by_station(traces, directory):
+    """
+    Dump station traces to MiniSEED files and corresponding StationXML files.
+
+    Args:
+        traces (obspy.core.stream.Stream): The traces to be dumped.
+        directory (str): The directory where the files will be saved.
+
+    Returns:
+        None
+    """
+    logger.info("Mseed dump:")
+    try:
+        os.makedirs(directory, exist_ok=True)
+        logger.debug("Directory '%s' created successfully." % directory)
+    except OSError as error:
+        logger.error("Directory '%s' can not be created !" % directory)
+
+    id_list = []
+    for tr in traces:
+        id_list.append(tr.id.split("."))
+
+    df = pd.DataFrame(id_list, columns=["net", "sta", "loc", "chan"])
+    for g in df.groupby(["net", "sta", "loc"]):
+        st = traces.select(network=g[0][0], station=g[0][1], location=g[0][2])
+        stats = st[0].stats
+        filename = os.path.join(
+            directory,
+            f"{stats.network}.{stats.station}.{stats.location}.{stats.starttime}.{stats.endtime}",
+        )
+        st.write(filename + ".mseed", format="MSEED")
+        stats.response.write(filename + ".xml", format="STATIONXML")
 
 
 def inventory2df(inventory: Inventory) -> pd.DataFrame:
@@ -369,7 +413,7 @@ class EventFetcher(object):
         keep_only_3channels_station=False,
         enable_RTrotation=False,
         enable_denoising=False,
-        denoise_model="dae",
+        denoise_model="original",
         backup_dirname=".",
         enable_read_cache=False,
         enable_write_cache=False,
@@ -464,7 +508,8 @@ class EventFetcher(object):
                     cPickle.dump(self.st, fp)
             elif self.write_cache_format == "mseed":
                 try:
-                    mseed_dump(self.st, self.backup_traces_file)
+                    # mseed_dump_by_trace(self.st, self.backup_traces_file)
+                    mseed_dump_by_station(self.st, self.backup_traces_file)
                 except Exception as e:
                     logger.error(e)
                     return
