@@ -553,7 +553,7 @@ class EventFetcher(object):
 
         if not self.enable_read_cache or not fetch_from_cache_success:
             self.event_client = Client(
-                debug=self.fdsn_debug, service_mappings={"event": self.ws_event_url}
+                debug=self.fdsn_debug, service_mappings={"event": self.ws_event_url, "dataselect": None, "station": None}
             )
 
             logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
@@ -632,9 +632,11 @@ class EventFetcher(object):
                     debug=self.fdsn_debug,
                     base_url=self.base_url,
                     service_mappings={
+                        "event": None,
                         "dataselect": self.ws_dataselect_url,
                         "station": self.ws_station_url,
                     },
+                    timeout=300,
                 )
 
             # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
@@ -730,7 +732,7 @@ class EventFetcher(object):
         try:
             inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
-            logger.error(f"{self.event.id}: {e}")
+            logger.error(f"{self.event.id}: {type(e).__name__} - {str(e)}")
             return Stream()
 
         # keep only stations with 3 component (using inventory info only)
@@ -1018,9 +1020,11 @@ class EventFetcher(object):
                 debug=self.fdsn_debug,
                 base_url=self.base_url,
                 service_mappings={
+                    "event": None,
                     "dataselect": self.ws_dataselect_url,
                     "station": self.ws_station_url,
                 },
+                timeout=300,
             )
 
         try:
