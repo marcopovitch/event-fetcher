@@ -407,6 +407,7 @@ class EventFetcher(object):
         ws_station_url=None,
         ws_dataselect_url=None,
         sds=None,
+        inventory=None,
         black_listed_waveforms_id=None,
         waveforms_id=None,
         use_only_trace_with_weighted_arrival=True,
@@ -437,7 +438,8 @@ class EventFetcher(object):
         self.enable_read_cache = enable_read_cache
         self.enable_write_cache = enable_write_cache
         self.write_cache_format = write_cache_format
-        # fdsn or sds
+        # fdsn or sds or inventory
+        self.inventory = inventory
         self.sds = sds
         self.fdsn_debug = fdsn_debug
         self.base_url = base_url
@@ -553,7 +555,12 @@ class EventFetcher(object):
 
         if not self.enable_read_cache or not fetch_from_cache_success:
             self.event_client = Client(
-                debug=self.fdsn_debug, service_mappings={"event": self.ws_event_url, "dataselect": None, "station": None}
+                debug=self.fdsn_debug,
+                service_mappings={
+                    "event": self.ws_event_url,
+                    "dataselect": None,
+                    "station": None,
+                },
             )
 
             logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
@@ -730,7 +737,20 @@ class EventFetcher(object):
         # get inventory
         logger.debug(f"{self.event.id}: getting station inventory ...")
         try:
-            inventory = self.trace_client.get_stations_bulk(bulk, level="response")
+            if self.inventory:
+                inventory = Inventory()
+                for w in self.waveforms_id:
+                    net, sta, loc, chan = w.split(".")
+                    inventory += self.inventory.select(
+                        network=net,
+                        station=sta,
+                        location=loc,
+                        channel=chan,
+                        starttime=starttime,
+                        endtime=endtime,
+                    )
+            else:
+                inventory = self.trace_client.get_stations_bulk(bulk, level="response")
         except Exception as e:
             logger.error(f"{self.event.id}: {type(e).__name__} - {str(e)}")
             return Stream()
@@ -850,15 +870,25 @@ class EventFetcher(object):
             # get coordinates since attach_response seems not to be enough
             logger.debug("Start to fetch inventory for %s", w)
             try:
-                inventory = self.trace_client.get_stations(
-                    network=net,
-                    station=sta,
-                    location=loc,
-                    channel=chan,
-                    starttime=starttime,
-                    endtime=endtime,
-                    level="response",
-                )
+                if self.inventory:
+                    inventory = self.inventory.select(
+                        network=net,
+                        station=sta,
+                        location=loc,
+                        channel=chan,
+                        starttime=starttime,
+                        endtime=endtime,
+                    )
+                else:
+                    inventory = self.trace_client.get_stations(
+                        network=net,
+                        station=sta,
+                        location=loc,
+                        channel=chan,
+                        starttime=starttime,
+                        endtime=endtime,
+                        level="response",
+                    )
             except Exception as e:
                 logger.error("(get_trace/inv)%s %s", e, self.event.id)
                 continue
@@ -1028,16 +1058,26 @@ class EventFetcher(object):
             )
 
         try:
-            inventory = self.trace_client.get_stations(
-                starttime=t0,
-                endtime=t0,
-                level="channel",
-                latitude=self.event.latitude,
-                longitude=self.event.longitude,
-                minradius=0,
-                maxradius=dist_km / 111.0,  # dist in degres
-                includerestricted=True,
-            )
+            if self.inventory:
+                inventory = self.inventory.select(
+                    starttime=t0,
+                    endtime=t0,
+                    latitude=self.event.latitude,
+                    longitude=self.event.longitude,
+                    minradius=0,
+                    maxradius=dist_km / 111.0,  # dist in degres
+                )
+            else:
+                inventory = self.trace_client.get_stations(
+                    starttime=t0,
+                    endtime=t0,
+                    level="channel",
+                    latitude=self.event.latitude,
+                    longitude=self.event.longitude,
+                    minradius=0,
+                    maxradius=dist_km / 111.0,  # dist in degres
+                    includerestricted=True,
+                )
         except Exception as e:
             logger.error(
                 "(get_event_waveforms_id_within_distance) %s %s", e, self.event.id
