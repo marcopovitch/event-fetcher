@@ -35,8 +35,8 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.INFO)
 
-MODEL = os.path.join(SEIS_DAE, "Models", "gr_mixed_stft.h5")
-CONFIG = os.path.join(SEIS_DAE, "config", "gr_mixed_stft.config")
+#MODEL = os.path.join(SEIS_DAE, "Models", "gr_mixed_stft.h5")
+#CONFIG = os.path.join(SEIS_DAE, "config", "gr_mixed_stft.config")
 
 
 def phasenet_dump(traces, directory):
@@ -1280,15 +1280,15 @@ def load_config(conf_file):
     return conf
 
 
-def denoise_config_check():
-    # check if MODEL and CONFIG are defined and exist
-    if not os.path.isfile(MODEL):
-        logger.error("Deep denoise model file '%s' not found !", MODEL)
-        return False
-    if not os.path.isfile(CONFIG):
-        logger.error("Deep denoise config file '%s' not found !", CONFIG)
-        return False
-    return True
+# def denoise_config_check():
+#     # check if MODEL and CONFIG are defined and exist
+#     if not os.path.isfile(MODEL):
+#         logger.error("Deep denoise model file '%s' not found !", MODEL)
+#         return False
+#     if not os.path.isfile(CONFIG):
+#         logger.error("Deep denoise config file '%s' not found !", CONFIG)
+#         return False
+#     return True
 
 
 def denoise_stream(stream, model_name=None, preprocess=True):
@@ -1404,8 +1404,8 @@ if __name__ == "__main__":
         sys.exit(255)
 
     # check only if model exist
-    if not denoise_config_check():
-        sys.exit(255)
+    # if not denoise_config_check():
+    #    sys.exit(255)
 
     conf = load_config(args.conf_file)
     if not conf:
@@ -1424,6 +1424,9 @@ if __name__ == "__main__":
 
     if args.denoise:
         conf["enable_denoising"] = True
+        raise NotImplementedError(
+            "Denoising is deactivated for now."
+        )
     else:
         conf["enable_denoising"] = False
 
