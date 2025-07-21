@@ -25,9 +25,9 @@ from keras.models import load_model
 import seisbench.models as sbm
 
 # Denoiser: https://github.com/JanisHe/seisDAE
-SEIS_DAE = "/Users/marc/github/seisDAE"
-sys.path.append(SEIS_DAE)
-from denoiser.denoise_utils import denoising_stream
+# SEIS_DAE = "/Users/marc/github/seisDAE"
+# sys.path.append(SEIS_DAE)
+# from denoiser.denoise_utils import denoising_stream
 
 
 # default logger
@@ -1306,12 +1306,15 @@ def denoise_stream(stream, model_name=None, preprocess=True):
         st.taper(max_percentage=0.05, type="cosine", side="both")
 
     if model_name == "dae":
-        try:
-            model_dae = load_model(MODEL)
-        except ValueError:
-            model_dae = load_model(MODEL, compile=False)
-        st_denoised, st_noise = denoising_stream(
-            stream=st, config_filename=CONFIG, loaded_model=model_dae, parallel=True
+        # try:
+        #     model_dae = load_model(MODEL)
+        # except ValueError:
+        #     model_dae = load_model(MODEL, compile=False)
+        # st_denoised, st_noise = denoising_stream(
+        #     stream=st, config_filename=CONFIG, loaded_model=model_dae, parallel=True
+        # )
+        raise NotImplementedError(
+            "Denoising with DAE model is deactivated for now."
         )
     else:
         denoise_model = sbm.DeepDenoiser.from_pretrained(model_name)
