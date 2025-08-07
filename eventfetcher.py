@@ -21,7 +21,7 @@ from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
 # Denoiser
-from keras.models import load_model
+#from keras.models import load_model
 import seisbench.models as sbm
 
 # Denoiser: https://github.com/JanisHe/seisDAE
