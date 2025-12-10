@@ -13,8 +13,14 @@ dependencies = [
     "seisbench>=0.9.1",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[project.scripts]
+eventfetcher = "eventfetcher:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
     "ipython",
     "icecream"
 ]
