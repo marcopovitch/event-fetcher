@@ -12,10 +12,9 @@ import yaml
 import urllib.parse
 import urllib.error
 import pandas as pd
-from icecream import ic
 
 from obspy import Inventory
-from obspy import Stream, read_events, UTCDateTime
+from obspy import Stream, read_events
 from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
@@ -33,7 +32,7 @@ import seisbench.models as sbm
 # default logger
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 #MODEL = os.path.join(SEIS_DAE, "Models", "gr_mixed_stft.h5")
 #CONFIG = os.path.join(SEIS_DAE, "config", "gr_mixed_stft.config")
@@ -44,7 +43,7 @@ def phasenet_dump(traces, directory):
     try:
         os.makedirs(directory, exist_ok=True)
         logger.debug("Directory '%s' created successfully." % directory)
-    except OSError as error:
+    except OSError:
         logger.error("Directory '%s' can not be created !" % directory)
 
     # get net.cha.loc.* from all traces
@@ -106,7 +105,7 @@ def mseed_dump_by_trace(traces, directory, station_json=False):
     try:
         os.makedirs(directory, exist_ok=True)
         logger.debug("Directory '%s' created successfully." % directory)
-    except OSError as error:
+    except OSError:
         logger.error("Directory '%s' can not be created !" % directory)
 
     for tr in traces:
@@ -138,7 +137,7 @@ def mseed_dump_by_station(traces, directory):
     try:
         os.makedirs(directory, exist_ok=True)
         logger.debug("Directory '%s' created successfully." % directory)
-    except OSError as error:
+    except OSError:
         logger.error("Directory '%s' can not be created !" % directory)
 
     id_list = []
@@ -170,19 +169,6 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
     for network in inventory:
         for station in network:
             for channel in station.channels:
-
-                if channel.response and channel.response.instrument_sensitivity:
-                    scale = channel.response.instrument_sensitivity.value
-                    scale_freq = channel.response.instrument_sensitivity.frequency
-                    scale_units = channel.response.instrument_sensitivity.input_units
-                else:
-                    scale = scale_freq = scale_units = None
-
-                if channel.sensor:
-                    sensor_description = channel.sensor.description
-                else:
-                    sensor_description = None
-
                 channel_info = {
                     "Network": network.code,
                     "Station": station.code,
@@ -311,7 +297,7 @@ def remove_flat_traces(waveforms_id, traces, txt):
     # variance is used to detect flat signal
     tolerance = 1e-5
     traces_to_remove = []
-    for i, trace in enumerate(traces):
+    for trace in traces:
         variance = np.var(trace.data)
         if variance < tolerance:
             traces_to_remove.append(trace)
@@ -331,7 +317,7 @@ def remove_flat_traces(waveforms_id, traces, txt):
 def remove_traces_without_3channels(waveforms_id, traces, txt):
     traces_done = []
     traces_to_remove = []
-    for i, trace in enumerate(traces):
+    for trace in traces:
         stats = trace.stats
         net_sta_loc = ".".join([stats.network, stats.station, stats.location])
         if net_sta_loc in traces_done:
@@ -659,9 +645,9 @@ class EventFetcher(object):
 
         if self.enable_denoising:
             # denoise_model can be 'dae', 'original' or 'urban'.
-            logger.info(f"Denoising traces ... with model {self}")
+            logger.info(f"Denoising traces ... with model {self.denoise_model}")
             self.st = denoise_stream(self.st, model_name=self.denoise_model)
-            print(self.st)
+            logger.debug(self.st)
 
         # remove black listed channels
         # to be optimized (at inventory level if possible)
@@ -1193,7 +1179,7 @@ def _test(event_id):
         logger.info(mydata.st.__str__(extended=True))
 
 
-def _get_data(conf, event_id=None, fdsn_profile=None) -> bool:
+def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
     # force eventid_id
     if not event_id:
         event_id = urllib.parse.quote(conf.event_id, safe="")
@@ -1222,9 +1208,9 @@ def _get_data(conf, event_id=None, fdsn_profile=None) -> bool:
         logger.error("eventid must be set (in yaml file or using option -e eventid) !")
         sys.exit(255)
 
-    numeric_level = getattr(logging, args.loglevel.upper(), None)
+    numeric_level = getattr(logging, loglevel.upper(), None)
     if not numeric_level:
-        logger.error("Invalid loglevel '%s' !", args.loglevel.upper())
+        logger.error("Invalid loglevel '%s' !", loglevel.upper())
         logger.error("loglevel should be: debug,warning,info,error.")
         sys.exit(255)
 
@@ -1336,7 +1322,7 @@ def denoise_stream(stream, model_name=None, preprocess=True):
     return st_denoised
 
 
-if __name__ == "__main__":
+def main():
     logger.setLevel(logging.INFO)
 
     parser = argparse.ArgumentParser()
@@ -1403,11 +1389,13 @@ if __name__ == "__main__":
         parser.print_help()
         sys.exit(255)
 
-    # check only if model exist
-    # if not denoise_config_check():
-    #    sys.exit(255)
+    if not args.conf_file:
+        logger.error("Configuration file is required (-c/--conf)")
+        parser.print_help()
+        sys.exit(255)
 
     conf = load_config(args.conf_file)
+
     if not conf:
         sys.exit()
 
@@ -1430,8 +1418,12 @@ if __name__ == "__main__":
     else:
         conf["enable_denoising"] = False
 
-    retcode = _get_data(conf, args.eventid, args.fdsn_profile)
+    retcode = _get_data(conf, args.eventid, args.fdsn_profile, args.loglevel)
     if not retcode:
         sys.exit(1)
     else:
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

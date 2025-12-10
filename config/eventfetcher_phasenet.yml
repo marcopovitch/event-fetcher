@@ -6,7 +6,7 @@ event_id: null
 # endtime default is starttime + time_length
 starttime: null
 endtime: null
-time_length: 90
+time_length: 120
 
 # add extra time offset to starttime
 starttime_offset: -10
@@ -44,16 +44,16 @@ fdsnws:
   default_url_mapping: seiscomp
   url_mapping:
     franceseisme:
-      ws_base_url: http://10.0.1.36
+      ws_base_url: http://10.90.30.115
       ws_event_url: https://api.franceseisme.fr/fdsnws/event/1/
-      ws_station_url: http://10.0.1.36:8080/fdsnws/station/1/
-      ws_dataselect_url: http://10.0.1.36:8080/fdsnws/dataselect/1/
+      ws_station_url: http://10.90.30.115:8080/fdsnws/station/1/
+      ws_dataselect_url: http://10.90.30.115:8080/fdsnws/dataselect/1/
 
     seiscomp:
-      ws_base_url: http://10.0.1.36
-      ws_event_url: http://10.0.1.36:8080/fdsnws/event/1/
-      ws_station_url: http://10.0.1.36:8080/fdsnws/station/1/
-      ws_dataselect_url: http://10.0.1.36:8080/fdsnws/dataselect/1/
+      ws_base_url: http://10.90.30.115
+      ws_event_url: http://10.90.30.115:8080/fdsnws/event/1/
+      ws_station_url: http://10.90.30.1156:8080/fdsnws/station/1/
+      ws_dataselect_url: http://10.90.30.115:8080/fdsnws/dataselect/1/
 
     resif:
       ws_base_url: http://ws.resif.fr
