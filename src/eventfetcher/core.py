@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import fnmatch
 import os
 import _pickle as cPickle
 import logging
@@ -183,42 +184,45 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
     return df
 
 
-def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
+def _build_station_channel_cache(full_df: pd.DataFrame) -> dict:
+    """Pre-compute available channels per station for fast lookups."""
+    station_cache = {}
+    grouped = full_df.groupby(["Network", "Station", "Location"], sort=False)
+    for key, group in grouped:
+        max_sample_rate = group["SampleRate"].max()
+        filtered = group[group["SampleRate"] == max_sample_rate]
+        filtered = filtered.sort_values(by="StartTime").head(3)
+        station_cache[key] = filtered["Channel"].tolist()
+    return station_cache
+
+
+def filter_out_station_without_3channels(
+    waveforms_id, bulk, inventory, txt, inventory_df=None
+):
     # Convert inventory to dataframe once (performance optimization)
-    full_df = inventory2df(inventory)
+    full_df = inventory_df if inventory_df is not None else inventory2df(inventory)
     if full_df.empty:
         logger.error(f"[{txt}] No metadata in inventory")
         return waveforms_id, []
 
+    station_cache = _build_station_channel_cache(full_df)
     tmp_bulk = []
     waveforms_to_remove = []
 
     for net, sta, loc, chan, t1, t2 in bulk:
-        # Filter dataframe for this station
-        df = full_df[
-            (full_df["Network"] == net) &
-            (full_df["Station"] == sta) &
-            (full_df["Location"] == loc)
-        ]
-
-        if df.empty:
+        channels = station_cache.get((net, sta, loc))
+        if not channels:
             logger.error(f"No metadata for {net}.{sta}.{loc}.{chan}")
             continue
 
-        # Keep only channels with the highest sample rate
-        max_sample_rate = df["SampleRate"].max()
-        df = df[df["SampleRate"] == max_sample_rate]
-        df = df.sort_values(by="StartTime").head(3)
-        chan = df["Channel"].iloc[0]
-        chan = chan[:2] + "?"
-
-        if len(df) == 3:
+        chan = channels[0][:2] + "?"
+        if len(channels) == 3:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
             w = ".".join((net, sta, loc, chan))
             logger.debug(
                 "[%s] Filtering out %s (only %d channel(s))"
-                % (txt, w, len(df))
+                % (txt, w, len(channels))
             )
             waveforms_to_remove.append((net, sta))
 
@@ -272,6 +276,42 @@ def cleanup_waveforms_id(waveforms_id, waveform_id):
     return [wid for wid in waveforms_id if not wid.startswith(prefix)]
 
 
+def _is_pattern_blacklisting_waveform(pattern, waveform_id):
+    """Return True if waveform_id matches pattern using regex or shell wildcards."""
+    if not pattern:
+        return False
+    try:
+        if re.match(pattern, waveform_id):
+            return True
+    except re.error:
+        logger.debug("Invalid regex pattern '%s' ignored.", pattern)
+    return fnmatch.fnmatch(waveform_id, pattern)
+
+
+def _build_channel_rate_map(df_inventory):
+    """Return exact and station-level sample rate maps from inventory dataframe."""
+    if df_inventory.empty:
+        return {"exact": {}, "station": {}}
+
+    channel_rates_exact = {}
+    channel_rates_station = {}
+    for row in df_inventory.itertuples(index=False):
+        key_exact = (
+            (row.Network, row.Station, row.Location, row.Channel)
+        )
+        channel_rates_exact[key_exact] = row.SampleRate
+
+        key_station = (row.Network, row.Station, row.Channel)
+        current = channel_rates_station.get(key_station)
+        rate_value = row.SampleRate
+        if current is None or (
+            rate_value is not None and rate_value > current
+        ):
+            channel_rates_station[key_station] = rate_value
+
+    return {"exact": channel_rates_exact, "station": channel_rates_station}
+
+
 def remove_flat_traces(waveforms_id, traces, txt):
     # variance is used to detect flat signal
     tolerance = 1e-5
@@ -294,21 +334,16 @@ def remove_flat_traces(waveforms_id, traces, txt):
 
 
 def remove_traces_without_3channels(waveforms_id, traces, txt):
-    traces_done = set()  # Use set for O(1) lookup instead of O(n)
-    traces_to_remove = []
-
+    station_groups = {}
     for trace in traces:
         stats = trace.stats
-        net_sta_loc = f"{stats.network}.{stats.station}.{stats.location}"
-        if net_sta_loc in traces_done:
-            continue
+        key = f"{stats.network}.{stats.station}.{stats.location}"
+        station_groups.setdefault(key, []).append(trace)
 
-        tmp = traces.select(
-            network=stats.network, station=stats.station, location=stats.location
-        )
-        if tmp.count() != 3:
-            traces_to_remove.extend(tmp)
-        traces_done.add(net_sta_loc)
+    traces_to_remove = []
+    for key, grouped_traces in station_groups.items():
+        if len(grouped_traces) != 3:
+            traces_to_remove.extend(grouped_traces)
 
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
@@ -411,21 +446,27 @@ class EventFetcher(object):
         self.ws_dataselect_url = ws_dataselect_url
         self.trace_client = None
 
-        if not os.path.isdir(backup_dirname):
+        self.cache_event_id = urllib.parse.quote(event_id, safe="")
+        cache_dir = backup_dirname
+        normalized_backup = os.path.normpath(backup_dirname)
+        if os.path.basename(normalized_backup) != self.cache_event_id:
+            cache_dir = os.path.join(backup_dirname, self.cache_event_id)
+
+        if not os.path.isdir(cache_dir):
             try:
-                os.makedirs(backup_dirname, exist_ok=True)
-                logger.debug("set up %s as cache directory", backup_dirname)
+                os.makedirs(cache_dir, exist_ok=True)
+                logger.debug("set up %s as cache directory", cache_dir)
             except Exception as e:
-                logger.error(
-                    "Can't create cache directory '%s' (%s) !", backup_dirname, e
-                )
+                logger.error("Can't create cache directory '%s' (%s) !", cache_dir, e)
                 self.event = EventInfo()
                 return
 
+        self.cache_dir = cache_dir
+
         self.backup_event_file = os.path.join(
-            backup_dirname, f"{urllib.parse.quote(event_id, safe='')}.qml"
+            self.cache_dir, f"{self.cache_event_id}.qml"
         )
-        self.backup_traces_file = os.path.join(backup_dirname, "waveforms")
+        self.backup_traces_file = os.path.join(self.cache_dir, "waveforms")
 
         if black_listed_waveforms_id:
             self.black_listed_waveforms_id = black_listed_waveforms_id
@@ -642,7 +683,7 @@ class EventFetcher(object):
         return waveforms_id
 
     def _hack_streams(self, waveforms_ids):
-        """Hack to get rid off sc3 users mislabeling phases."""
+        """Normalize waveform ids and ensure we request all components."""
         wfid_list = set()
         for w in waveforms_ids:
             w_fixed = self._hack_P_stream(w)
@@ -664,25 +705,32 @@ class EventFetcher(object):
                 else:
                     logger.debug(f"Removed black listed trace fid {wfid}")
 
-    def get_trace_bulk(self, starttime, endtime):
-        logger.debug(f"{self.event.id}: building station list ...")
-        bulk = []
+    def _filter_blacklisted_waveforms(self):
+        filtered = []
         for w in self.waveforms_id:
-            # check if black listed using regex
-            if any(re.match(b, w) for b in self.black_listed_waveforms_id):
+            if any(
+                _is_pattern_blacklisting_waveform(b, w)
+                for b in self.black_listed_waveforms_id
+            ):
                 logger.info(f"{self.event.id}: ignoring black listed {w} !")
                 continue
+            filtered.append(w)
+        return filtered
 
+    def _build_bulk_entries(self, waveforms, starttime, endtime):
+        bulk = []
+        for w in waveforms:
             logger.debug(f"{self.event.id}: adding station {w}")
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
+        return bulk
 
-        # get inventory
+    def _fetch_inventory_for_waveforms(self, waveforms, starttime, endtime):
         logger.debug(f"{self.event.id}: getting station inventory ...")
         try:
             if self.inventory:
                 inventory = Inventory()
-                for w in self.waveforms_id:
+                for w in waveforms:
                     net, sta, loc, chan = w.split(".")
                     inventory += self.inventory.select(
                         network=net,
@@ -693,15 +741,105 @@ class EventFetcher(object):
                         endtime=endtime,
                     )
             else:
+                bulk = self._build_bulk_entries(waveforms, starttime, endtime)
                 inventory = self.trace_client.get_stations_bulk(bulk, level="response")
+            return inventory
         except Exception as e:
             logger.error(f"{self.event.id}: {type(e).__name__} - {str(e)}")
+            return None
+
+    def _apply_preferred_sample_rate(self, inventory_df):
+        channel_rates = _build_channel_rate_map(inventory_df)
+        if not channel_rates["exact"] and not channel_rates["station"]:
+            return
+
+        instrument_priority = {"H": 1, "N": 0}
+        best_waveforms = {}
+        for idx, wid in enumerate(self.waveforms_id):
+            net, sta, loc, chan = wid.split(".")
+            component = chan[-1] if chan else ""
+            sample_rate = channel_rates["exact"].get((net, sta, loc, chan))
+            if sample_rate is None:
+                sample_rate = channel_rates["station"].get((net, sta, chan))
+            rate_cmp = sample_rate if sample_rate is not None else -1
+            instrument_code = chan[1] if len(chan) > 1 else ""
+            instrument_prio = instrument_priority.get(instrument_code.upper(), -1)
+
+            key = (net, sta, component)
+            current = best_waveforms.get(key)
+            replace = False
+            if current is None:
+                replace = True
+            else:
+                if rate_cmp > current["rate"]:
+                    replace = True
+                elif rate_cmp == current["rate"]:
+                    if instrument_prio > current["instrument_prio"]:
+                        replace = True
+                    elif instrument_prio == current["instrument_prio"] and chan > current["chan"]:
+                        replace = True
+            if replace:
+                best_waveforms[key] = {
+                    "idx": idx,
+                    "waveform": wid,
+                    "rate": rate_cmp,
+                    "instrument_prio": instrument_prio,
+                    "chan": chan,
+                }
+
+        preferred_waveforms = [
+            entry["waveform"]
+            for entry in sorted(best_waveforms.values(), key=lambda e: e["idx"])
+        ]
+
+        if preferred_waveforms and len(preferred_waveforms) != len(self.waveforms_id):
+            logger.debug(
+                "%s: dropping lower sample-rate duplicates (%d -> %d waveforms).",
+                self.event.id,
+                len(self.waveforms_id),
+                len(preferred_waveforms),
+            )
+            self.waveforms_id = preferred_waveforms
+
+    def get_trace_bulk(self, starttime, endtime):
+        """Workflow: 
+            blacklist filtering  
+            inventory fetch 
+            rate-based pruning 
+            bulk download.
+        """
+        logger.debug(f"{self.event.id}: building station list ...")
+        self.waveforms_id = self._filter_blacklisted_waveforms()
+        if not self.waveforms_id:
+            logger.warning("%s: All waveforms filtered out by blacklist.", self.event.id)
             return Stream()
+
+        inventory = self._fetch_inventory_for_waveforms(
+            self.waveforms_id, starttime, endtime
+        )
+        if inventory is None:
+            return Stream()
+
+        inventory_df = inventory2df(inventory)
+        inventory_df["SampleRate"] = pd.to_numeric(
+            inventory_df["SampleRate"], errors="coerce"
+        )
+
+        self._apply_preferred_sample_rate(inventory_df)
+
+        if not self.waveforms_id:
+            logger.warning(
+                "%s: No waveform left after applying preferred sample rate filter.",
+                self.event.id,
+            )
+            return Stream()
+
+        bulk = self._build_bulk_entries(self.waveforms_id, starttime, endtime)
 
         # keep only stations with 3 component (using inventory info only)
         if self.keep_only_3channels_station:
             self.waveforms_id, bulk = filter_out_station_without_3channels(
-                self.waveforms_id, bulk, inventory, self.event.id
+                self.waveforms_id, bulk, inventory, self.event.id, inventory_df
             )
 
         # get rid off stations too far away

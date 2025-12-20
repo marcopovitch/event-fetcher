@@ -18,7 +18,8 @@ use_only_trace_with_weighted_arrival: False
 station_max_dist_km: 350
 
 # list of black listed waveform ids ["NET.STA.LOC.CHAN", ... ]
-black_listed_waveforms_id: null
+black_listed_waveforms_id: ["XX.GPIL", "XX.GP*", "1K.EO*"]
+#black_listed_waveforms_id: []
 
 # get only this waveforn id "NET.STA.LOC.CHAN"
 waveforms_id: null
