@@ -19,94 +19,73 @@ from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
-# Denoiser
-#from keras.models import load_model
-import seisbench.models as sbm
-
-# Denoiser: https://github.com/JanisHe/seisDAE
-# SEIS_DAE = "/Users/marc/github/seisDAE"
-# sys.path.append(SEIS_DAE)
-# from denoiser.denoise_utils import denoising_stream
-
-
 # default logger
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.DEBUG)
 
-#MODEL = os.path.join(SEIS_DAE, "Models", "gr_mixed_stft.h5")
-#CONFIG = os.path.join(SEIS_DAE, "config", "gr_mixed_stft.config")
-
 
 def phasenet_dump(traces, directory):
     logger.info("PhaseNet dump:")
-    try:
-        os.makedirs(directory, exist_ok=True)
-        logger.debug("Directory '%s' created successfully." % directory)
-    except OSError:
-        logger.error("Directory '%s' can not be created !" % directory)
+    os.makedirs(directory, exist_ok=True)
+    logger.debug("Directory '%s' created successfully." % directory)
 
-    # get net.cha.loc.* from all traces
-    wfids = set()
+    # Get unique net.sta.loc identifiers and pre-select streams (call select once per wfid)
+    wfid_streams = {}
     for tr in traces:
-        wfids.add(".".join(tr.id.split(".")[:3]))
-    wfids = list(map(lambda x: x + ".*", wfids))
+        net_sta_loc = ".".join(tr.id.split(".")[:3])
+        if net_sta_loc not in wfid_streams:
+            wfid_streams[net_sta_loc] = traces.select(id=f"{net_sta_loc}.*")
 
-    for wfid in wfids:
-        net_sta_loc = ".".join(wfid.split(".")[:3])
-        st = traces.select(id=wfid)
-        filename = os.path.join(
-            directory,
-            f"{net_sta_loc}.mseed",
-        )
+    # Write mseed files
+    for net_sta_loc, st in wfid_streams.items():
+        filename = os.path.join(directory, f"{net_sta_loc}.mseed")
         st.write(filename, format="MSEED")
 
-    # generates chan.txt for dbclust
+    # Generate chan.txt for dbclust
     chantxt_filename = os.path.join(directory, "chan.txt")
     logger.debug(f"Generating {chantxt_filename}")
     with open(chantxt_filename, "w") as fp:
-        for wfid in wfids:
-            st = traces.select(id=wfid).sort(["channel"], reverse=True)
-            for tr in st:
+        for net_sta_loc, st in wfid_streams.items():
+            st_sorted = st.copy().sort(["channel"], reverse=True)
+            for tr in st_sorted:
                 s = tr.stats
                 fp.write(f"{s.network}_{s.station}_{s.location}_{s.channel}\n")
 
-    # generates csv file
+    # Generate csv file
     csv_filename = os.path.join(directory, "fname.csv")
     logger.debug(f"Generating {csv_filename}")
     with open(csv_filename, "w") as fp:
         fp.write("fname,E,N,Z\n")
-        for wfid in wfids:
-            filename = ".".join(wfid.split(".")[:3]) + ".mseed"
-            st = traces.select(id=wfid)
-            Z_trace = st.select(component="Z")[0]
-            st.remove(Z_trace)
-            st.sort(["channel"], reverse=False)
-            try:
-                fp.write(
-                    f"{filename},{st[0].stats.channel},{st[1].stats.channel},{Z_trace.stats.channel}\n"
-                )
-            except Exception as e:
-                logger.error(e)
-                logger.error(f"Something went wrong getting 3 components in {wfid}:")
-                logger.error(st)
+        for net_sta_loc, st in wfid_streams.items():
+            filename = f"{net_sta_loc}.mseed"
+            z_traces = st.select(component="Z")
+            if not z_traces:
+                logger.error(f"No Z component found in {net_sta_loc}")
+                continue
+            z_trace = z_traces[0]
+            # Get horizontal components
+            h_traces = [tr for tr in st if tr.stats.channel[-1] != "Z"]
+            h_traces.sort(key=lambda tr: tr.stats.channel)
+            if len(h_traces) < 2:
+                logger.error(f"Not enough components (need 3) in {net_sta_loc}: {st}")
+                continue
+            fp.write(
+                f"{filename},{h_traces[0].stats.channel},{h_traces[1].stats.channel},{z_trace.stats.channel}\n"
+            )
 
 
-def mseed_dump_by_trace(traces, directory, station_json=False):
+def mseed_dump_by_trace(traces, directory):
     """
-    Dump traces to MiniSEED files and optionally generate a JSON station file.
+    Dump traces to MiniSEED files.
 
     Args:
         traces (list): List of traces to be dumped.
         directory (str): Directory path where the MiniSEED files will be saved.
-        station_json (bool, optional): Whether to generate a JSON station file. Defaults to False.
     """
     logger.info("Mseed dump:")
-    try:
-        os.makedirs(directory, exist_ok=True)
-        logger.debug("Directory '%s' created successfully." % directory)
-    except OSError:
-        logger.error("Directory '%s' can not be created !" % directory)
+    os.makedirs(directory, exist_ok=True)
+    logger.debug("Directory '%s' created successfully." % directory)
 
     for tr in traces:
         stats = tr.stats
@@ -115,11 +94,8 @@ def mseed_dump_by_trace(traces, directory, station_json=False):
             f"{stats.network}.{stats.station}.{stats.location}.{stats.channel}.{stats.starttime}.{stats.endtime}",
         )
         tr.write(filename + ".mseed", format="MSEED")
-        stats.response.write(filename + ".xml", format="STATIONXML")
-
-    # generates json station file
-    if station_json:
-        pass
+        if stats.response:
+            stats.response.write(filename + ".xml", format="STATIONXML")
 
 
 def mseed_dump_by_station(traces, directory):
@@ -134,11 +110,8 @@ def mseed_dump_by_station(traces, directory):
         None
     """
     logger.info("Mseed dump:")
-    try:
-        os.makedirs(directory, exist_ok=True)
-        logger.debug("Directory '%s' created successfully." % directory)
-    except OSError:
-        logger.error("Directory '%s' can not be created !" % directory)
+    os.makedirs(directory, exist_ok=True)
+    logger.debug("Directory '%s' created successfully." % directory)
 
     id_list = []
     for tr in traces:
@@ -153,7 +126,8 @@ def mseed_dump_by_station(traces, directory):
             f"{stats.network}.{stats.station}.{stats.location}.{stats.starttime}.{stats.endtime}",
         )
         st.write(filename + ".mseed", format="MSEED")
-        stats.response.write(filename + ".xml", format="STATIONXML")
+        if stats.response:
+            stats.response.write(filename + ".xml", format="STATIONXML")
 
 
 def inventory2df(inventory: Inventory) -> pd.DataFrame:
@@ -210,38 +184,49 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
 
 
 def filter_out_station_without_3channels(waveforms_id, bulk, inventory, txt):
-    tmp_bulk = []
-    for net, sta, loc, chan, t1, t2 in bulk:
-        rqt_time = t1 + (t2 - t1) / 2.0
-        inv = inventory.select(network=net, station=sta, location=loc, time=rqt_time)
+    # Convert inventory to dataframe once (performance optimization)
+    full_df = inventory2df(inventory)
+    if full_df.empty:
+        logger.error(f"[{txt}] No metadata in inventory")
+        return waveforms_id, []
 
-        # limits only to channels with the highest sample rate
-        df = inventory2df(inv)
+    tmp_bulk = []
+    waveforms_to_remove = []
+
+    for net, sta, loc, chan, t1, t2 in bulk:
+        # Filter dataframe for this station
+        df = full_df[
+            (full_df["Network"] == net) &
+            (full_df["Station"] == sta) &
+            (full_df["Location"] == loc)
+        ]
+
         if df.empty:
             logger.error(f"No metadata for {net}.{sta}.{loc}.{chan}")
             continue
 
+        # Keep only channels with the highest sample rate
         max_sample_rate = df["SampleRate"].max()
         df = df[df["SampleRate"] == max_sample_rate]
-        df = df.sort_values(by="StartTime")[:3]
-        chan = df["Channel"].tolist()[0]
+        df = df.sort_values(by="StartTime").head(3)
+        chan = df["Channel"].iloc[0]
         chan = chan[:2] + "?"
 
         if len(df) == 3:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
         else:
             w = ".".join((net, sta, loc, chan))
-            if inv:
-                logger.debug(
-                    "[%s] Filtering out %s (only %d channel(s))"
-                    % (txt, w, len(inv[0][0]))
-                )
-            else:
-                logger.warning(
-                    "[%s] Filtering out %s (no metadata at %s)" % (txt, w, rqt_time)
-                )
-            id = ".".join((net, sta, loc, chan))
-            waveforms_id = cleanup_waveforms_id(waveforms_id, id)
+            logger.debug(
+                "[%s] Filtering out %s (only %d channel(s))"
+                % (txt, w, len(df))
+            )
+            waveforms_to_remove.append((net, sta))
+
+    # Remove waveforms in batch (avoid modifying list while iterating)
+    for net, sta in waveforms_to_remove:
+        waveforms_id = [w for w in waveforms_id
+                        if not (w.startswith(f"{net}.{sta}."))]
+
     return waveforms_id, tmp_bulk
 
 
@@ -274,23 +259,17 @@ def filter_out_station_by_distance(
                 "Filtering out %s (dist(%.1f) > %.1f)"
                 % (w, distance, station_max_dist_km)
             )
-            id = ".".join((net, sta, loc, chan))
-            waveforms_id = cleanup_waveforms_id(waveforms_id, id)
+            waveform_id = ".".join((net, sta, loc, chan))
+            waveforms_id = cleanup_waveforms_id(waveforms_id, waveform_id)
     return waveforms_id, tmp_bulk
 
 
-def cleanup_waveforms_id(waveforms_id, id):
-    net, sta, loc, chan = id.split(".")
-    wid_to_remove = []
-    for wid in waveforms_id:
-        wid_net, wid_sta, wid_loc, wid_chan = wid.split(".")
-        if wid_net == net and wid_sta == sta:
-            wid_to_remove.append(wid)
-
-    for wid in wid_to_remove:
-        waveforms_id.remove(wid)
-
-    return waveforms_id
+def cleanup_waveforms_id(waveforms_id, waveform_id):
+    """Remove all waveform IDs matching the same network.station."""
+    net, sta, _, _ = waveform_id.split(".")
+    prefix = f"{net}.{sta}."
+    # Use list comprehension instead of remove() in loop (O(n) vs O(n²))
+    return [wid for wid in waveforms_id if not wid.startswith(prefix)]
 
 
 def remove_flat_traces(waveforms_id, traces, txt):
@@ -315,11 +294,12 @@ def remove_flat_traces(waveforms_id, traces, txt):
 
 
 def remove_traces_without_3channels(waveforms_id, traces, txt):
-    traces_done = []
+    traces_done = set()  # Use set for O(1) lookup instead of O(n)
     traces_to_remove = []
+
     for trace in traces:
         stats = trace.stats
-        net_sta_loc = ".".join([stats.network, stats.station, stats.location])
+        net_sta_loc = f"{stats.network}.{stats.station}.{stats.location}"
         if net_sta_loc in traces_done:
             continue
 
@@ -327,9 +307,8 @@ def remove_traces_without_3channels(waveforms_id, traces, txt):
             network=stats.network, station=stats.station, location=stats.location
         )
         if tmp.count() != 3:
-            for tr in tmp:
-                traces_to_remove.append(tr)
-        traces_done.append(net_sta_loc)
+            traces_to_remove.extend(tmp)
+        traces_done.add(net_sta_loc)
 
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
@@ -337,7 +316,7 @@ def remove_traces_without_3channels(waveforms_id, traces, txt):
             "[%s] Missing channel for %s: removing trace %s" % (txt, net_sta_loc, tr.id)
         )
         traces.remove(tr)
-        cleanup_waveforms_id(waveforms_id, tr.id)
+        waveforms_id = cleanup_waveforms_id(waveforms_id, tr.id)
 
     return waveforms_id
 
@@ -365,16 +344,14 @@ class EventInfo(object):
         self.qml = None
 
     def __str__(self):
-        try:
-            mystr = (
-                f"event_id={self.id}, {self.event_type}\n"
-                f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
-                f"magnitude={self.magnitude:.2f} {self.magnitude_type}"
-            )
-        except Exception as e:
-            logger.error(self.__dict__)
-            mystr = ""
-        return mystr
+        if self.latitude is None or self.longitude is None or self.depth is None:
+            return f"event_id={self.id}, incomplete data: {self.__dict__}"
+        mag_str = f"{self.magnitude:.2f} {self.magnitude_type}" if self.magnitude else "N/A"
+        return (
+            f"event_id={self.id}, {self.event_type}\n"
+            f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
+            f"magnitude={mag_str}"
+        )
 
 
 class EventFetcher(object):
@@ -458,19 +435,12 @@ class EventFetcher(object):
         self.event = EventInfo()
         self.event.id = event_id
         self._fetch_data(waveforms_id=waveforms_id)
-        # try:
-        #     self._fetch_data(waveforms_id=waveforms_id)
-        # except Exception as e:
-        #     logger.error(f"Can't get traces for event_id {event_id}")
-        #     logger.error(f"error: {e}")
-        #     self.st = []
-        #     return
 
         self.get_picks()
-        if self.st == []:
-            return
-        elif self.st is None:
+        if self.st is None:
             self.st = []
+            return
+        elif self.st == []:
             return
 
         self.compute_distance_az_baz()
@@ -490,13 +460,12 @@ class EventFetcher(object):
 
         # save traces with pickle
         if self.enable_write_cache and self.backup_traces_file:
-            logger.debug("writting to %s", self.backup_traces_file)
+            logger.debug("writing to %s", self.backup_traces_file)
             if self.write_cache_format == "pickle":
                 with open(self.backup_traces_file, "wb") as fp:
                     cPickle.dump(self.st, fp)
             elif self.write_cache_format == "mseed":
                 try:
-                    # mseed_dump_by_trace(self.st, self.backup_traces_file)
                     mseed_dump_by_station(self.st, self.backup_traces_file)
                 except Exception as e:
                     logger.error(e)
@@ -512,8 +481,6 @@ class EventFetcher(object):
             self.st.sort()
             if logger.level == logging.DEBUG:
                 logger.debug(self.st.__str__(extended=True))
-            # else:
-            #    logger.info("%s %s", self.event.id, self.st)
         else:
             logger.warning("No trace (%s) in _fetch_data() !", self.event.id)
 
@@ -553,13 +520,12 @@ class EventFetcher(object):
             cat = self.get_event()
 
         if not cat:
-            # logger.error("(%s) No event found !" % self.event.id)
             return
 
         try:
             self.event.qml = cat.events[0]
         except Exception as e:
-            logger.error(self.event.id, e)
+            logger.error("%s %s", self.event.id, e)
             return
 
         (
@@ -586,7 +552,7 @@ class EventFetcher(object):
                 self.waveforms_id = self._hack_streams(
                     self.get_event_waveforms_id(self.event.qml)
                 )
-                self.show_pick_offet(self.event.qml)
+                self.show_pick_offset(self.event.qml)
             else:
                 logger.debug("Using: get_event_waveforms_id_within_distance")
                 self.waveforms_id = self._hack_streams(
@@ -612,7 +578,7 @@ class EventFetcher(object):
             else:
                 logger.debug(
                     "Trying to fetch traces from cached file, but %s does not exist!",
-                    self.backup_event_file,
+                    self.backup_traces_file,
                 )
                 fetch_from_cache_success = False
 
@@ -632,12 +598,11 @@ class EventFetcher(object):
                     timeout=300,
                 )
 
-            # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
+            # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
             if self.sds:
                 self.trace_client_sds = ClientSDS(self.sds)
 
             logger.debug("Fetching traces (%s) from FDSN-WS or SDS", self.event.id)
-            # self.st = self.get_trace(self.starttime, self.endtime)
             try:
                 self.st = self.get_trace_bulk(self.starttime, self.endtime)
             except urllib.error.HTTPError as e:
@@ -648,10 +613,6 @@ class EventFetcher(object):
             logger.info(f"Denoising traces ... with model {self.denoise_model}")
             self.st = denoise_stream(self.st, model_name=self.denoise_model)
             logger.debug(self.st)
-
-        # remove black listed channels
-        # to be optimized (at inventory level if possible)
-        # self._remove_from_stream(self.black_listed_waveforms_id)
 
         if self.st == []:
             logger.warning("No traces (%s)!" % self.event.id)
@@ -691,10 +652,6 @@ class EventFetcher(object):
         return list(wfid_list)
 
     def _remove_from_stream(self, waveforms_id_list):
-        # remove black listed waveform_id
-        # should be optimized (to be done at the inventory level, if possible)
-        # for net, sta, loc, chan in waveforms_id_list:
-        #   wfid = f"{net}.{sta}.{loc}.{chan}"
         for wfid in waveforms_id_list:
             net, sta, loc, chan = wfid.split(".")
             for tr in self.st.select(
@@ -757,21 +714,14 @@ class EventFetcher(object):
                 self.station_max_dist_km,
             )
 
-        # get traces but without response as attach_response does not work as expected
         logger.debug(f"{self.event.id}: getting waveforms ...")
-        try:
-            if self.sds:
-                # Use SDS (seiscomp data struture) to get traces rather than fdsn-dataselect
-                traces = self.trace_client_sds.get_waveforms_bulk(bulk)
-            else:
-                traces = self.trace_client.get_waveforms_bulk(
-                    bulk, attach_response=False
-                )
-        except Exception as e:
-            # logger.error("%s %s", e, self.event.id)
-            # logger.error(e.status_code)
-            raise e
-            # return Stream()
+        if self.sds:
+            # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
+            traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+        else:
+            traces = self.trace_client.get_waveforms_bulk(
+                bulk, attach_response=False
+            )
 
         # merge multiple segments if any
         try:
@@ -791,7 +741,6 @@ class EventFetcher(object):
                 network=_stats.network,
                 station=_stats.station,
                 location=_stats.location,
-                # channel=_stats.channel,  # all channel have to be included for rotation !!??!!
                 time=starttime + (endtime - starttime) / 2.0,
             )
             logger.debug(traces[i].stats.response)
@@ -824,7 +773,6 @@ class EventFetcher(object):
     def get_trace(self, starttime, endtime):
         """Get waveform using FDSNWS"""
         traces = Stream()
-        # print(self.waveforms_id)
         for w in self.waveforms_id:
             logger.debug("Working on %s ... ", w)
             net, sta, loc, chan = w.split(".")
@@ -907,7 +855,7 @@ class EventFetcher(object):
         # make a copy and rotate traces
         # return only R and T traces
         if not hasattr(self, "waveforms_id"):
-            return
+            return Stream()
 
         wids = []
         for w in self.waveforms_id:
@@ -916,7 +864,6 @@ class EventFetcher(object):
             wids.append(".".join((net, sta, loc, "*")))
         wids = set(wids)
 
-        # print(wids)
         st_RT = Stream()
         stcopy = self.st.copy()
 
@@ -931,11 +878,7 @@ class EventFetcher(object):
 
             try:
                 logger.debug("Rotating %s" % wid)
-                inventory = st[0].stats.response  # All channel should be included here
-                # nb_channel = len(inventory.get_contents()["channels"])
-                # if nb_channel != 3:
-                #    logger.warning("%s has only %d channel" % (wid, nb_channel))
-                #    raise
+                inventory = st[0].stats.response
                 st.rotate(method="->ZNE", inventory=inventory)
                 st.rotate(method="NE->RT", inventory=inventory)
             except IndexError:
@@ -943,8 +886,6 @@ class EventFetcher(object):
             except Exception as e:
                 logger.warning("(%s) Can't rotate: %s (%s)", self.event.id, wid, e)
             else:
-                # logger.warning(st)
-                # remove Z trace
                 for tr in st.select(component="Z"):
                     st.remove(tr)
                 st_RT += st
@@ -970,7 +911,7 @@ class EventFetcher(object):
 
             if self.enable_write_cache and self.backup_event_file:
                 logger.debug(
-                    "writting event (%s) to quakeml file %s",
+                    "writing event (%s) to quakeml file %s",
                     self.event.id,
                     self.backup_event_file,
                 )
@@ -1003,24 +944,25 @@ class EventFetcher(object):
     def get_event_waveforms_id(self, e):
         waveforms_id = []
         o = e.preferred_origin()
+
+        # Build pick index for O(1) lookup instead of O(n) nested loop
+        pick_index = {p.resource_id: p for p in e.picks}
+
         for a in o.arrivals:
             if a.time_weight == 0.0 and self.use_only_trace_with_weighted_arrival:
                 continue
-            for p in e.picks:
-                if a.pick_id == p.resource_id:
-                    wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
-                    waveforms_id.append(wfid)
-                    logger.debug("Adding %s", wfid)
-                    # waveforms_id.append(p.waveform_id.get_seed_string())
-                    break
+            p = pick_index.get(a.pick_id)
+            if p:
+                wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
+                waveforms_id.append(wfid)
+                logger.debug("Adding %s", wfid)
         return waveforms_id
 
     def get_event_waveforms_id_within_distance(self, e, dist_km):
         if dist_km is None:
-            logger.error(
-                "When using use_only_trace_with_weighted_arrival=False,  station_max_dist_km must be defined !"
+            raise ValueError(
+                "When using use_only_trace_with_weighted_arrival=False, station_max_dist_km must be defined!"
             )
-            sys.exit(1)
 
         o = e.preferred_origin()
         t0 = o.time
@@ -1073,13 +1015,11 @@ class EventFetcher(object):
         waveforms_id = []
         for net in inventory:
             for sta in net:
-                # FIXME: get data with the higher sampling rate only
                 for chan in sta.select(channel="[SBHED][HNP]Z"):
                     wf_id = ".".join(
                         [net.code, sta.code, chan.location_code, chan.code]
                     )
                     waveforms_id.append(wf_id)
-                    # logger.debug(f"{wf_id} is in range.")
         return waveforms_id
 
     def compute_distance_az_baz(self):
@@ -1103,46 +1043,39 @@ class EventFetcher(object):
             tr.stats.distance = distance  # in meters
             tr.stats.back_azimuth = az
 
-    def get_picks(self, e=None):
-        self.picks = {}
+    def _get_p_phase_picks(self, e=None):
+        """Get P-phase picks with optimized lookup. Returns list of (wfid, pick) tuples."""
         if e is None:
             e = self.event.qml
             if e is None:
-                return
+                return []
 
         o = e.preferred_origin()
-        t0 = o.time
+        # Build pick index for O(1) lookup
+        pick_index = {p.resource_id: p for p in e.picks}
+
+        results = []
         for a in o.arrivals:
             if not a.phase.startswith("P"):
                 logger.debug("Looking for P phase: ignoring %s !", a.phase)
                 continue
-            for p in e.picks:
-                if a.pick_id == p.resource_id:
-                    wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
-                    self.picks[wfid] = {
-                        "time": p.time,
-                        "offset": p.time - (t0 + self.starttime_offset),
-                    }
-                    break
+            p = pick_index.get(a.pick_id)
+            if p:
+                wfid = self._hack_P_stream(p.waveform_id.get_seed_string())
+                results.append((wfid, p, o.time))
+        return results
 
-    def show_pick_offet(self, e=None):
-        if e is None:
-            e = self.event.qml
+    def get_picks(self, e=None):
+        self.picks = {}
+        for wfid, p, t0 in self._get_p_phase_picks(e):
+            self.picks[wfid] = {
+                "time": p.time,
+                "offset": p.time - (t0 + self.starttime_offset),
+            }
 
-        o = e.preferred_origin()
-        t0 = o.time
-        for a in o.arrivals:
-            if not a.phase.startswith("P"):
-                continue
-            for p in e.picks:
-                if a.pick_id == p.resource_id:
-                    logger.debug(
-                        "%s %s %s",
-                        self._hack_P_stream(p.waveform_id.get_seed_string()),
-                        p.time,
-                        p.time - t0,
-                    )
-                    break
+    def show_pick_offset(self, e=None):
+        for wfid, p, t0 in self._get_p_phase_picks(e):
+            logger.debug("%s %s %s", wfid, p.time, p.time - t0)
 
 
 def _test(event_id):
@@ -1182,7 +1115,7 @@ def _test(event_id):
 def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
     # force eventid_id
     if not event_id:
-        event_id = urllib.parse.quote(conf.event_id, safe="")
+        event_id = urllib.parse.quote(conf["event_id"], safe="")
     else:
         event_id = urllib.parse.quote(event_id, safe="")
 
@@ -1266,23 +1199,18 @@ def load_config(conf_file):
     return conf
 
 
-# def denoise_config_check():
-#     # check if MODEL and CONFIG are defined and exist
-#     if not os.path.isfile(MODEL):
-#         logger.error("Deep denoise model file '%s' not found !", MODEL)
-#         return False
-#     if not os.path.isfile(CONFIG):
-#         logger.error("Deep denoise config file '%s' not found !", CONFIG)
-#         return False
-#     return True
+# Module-level cache for denoising models (lazy loaded)
+_denoise_models = {}
 
 
 def denoise_stream(stream, model_name=None, preprocess=True):
-    assert model_name in (
-        "dae",
-        "original",
-        "urban",
-    ), "Model name must be 'dae', 'original' or 'urban'"
+    if model_name not in ("dae", "original", "urban"):
+        raise ValueError("Model name must be 'dae', 'original' or 'urban'")
+
+    if model_name == "dae":
+        raise NotImplementedError(
+            "Denoising with DAE model is deactivated for now."
+        )
 
     st = stream.copy()
 
@@ -1291,30 +1219,25 @@ def denoise_stream(stream, model_name=None, preprocess=True):
         st.detrend(type="linear")
         st.taper(max_percentage=0.05, type="cosine", side="both")
 
-    if model_name == "dae":
-        # try:
-        #     model_dae = load_model(MODEL)
-        # except ValueError:
-        #     model_dae = load_model(MODEL, compile=False)
-        # st_denoised, st_noise = denoising_stream(
-        #     stream=st, config_filename=CONFIG, loaded_model=model_dae, parallel=True
-        # )
-        raise NotImplementedError(
-            "Denoising with DAE model is deactivated for now."
-        )
-    else:
-        denoise_model = sbm.DeepDenoiser.from_pretrained(model_name)
-        st_denoised = denoise_model.annotate(st)
+    # Lazy import and cache the model (loaded once per model_name)
+    if model_name not in _denoise_models:
+        import seisbench.models as sbm
+        logger.info(f"Loading DeepDenoiser model '{model_name}'...")
+        _denoise_models[model_name] = sbm.DeepDenoiser.from_pretrained(model_name)
 
-    # copy coordinates and response to denoised traces
+    denoise_model = _denoise_models[model_name]
+    st_denoised = denoise_model.annotate(st)
+
+    # Copy coordinates and response to denoised traces
     for tr in st_denoised:
         if model_name in ["original", "urban"]:
-            # remove the 'DeepDenoiser_' prefix
+            # Remove the 'DeepDenoiser_' prefix
             tr.stats.channel = tr.stats.channel.split("_")[1]
 
         # Find corresponding trace
         mytrace = st.select(id=tr.id)
-        assert mytrace, f"Something when wrong when finding {tr.id}"
+        if not mytrace:
+            raise RuntimeError(f"Cannot find matching trace for {tr.id}")
 
         tr.stats.coordinates = mytrace[0].stats.coordinates
         tr.stats.response = mytrace[0].stats.response
