@@ -1,5 +1,5 @@
 [project]
-name = "event-fetcher"
+name = "eventfetcher"
 version = "1.3.0"
 description = "A project to fetch events"
 authors = [
