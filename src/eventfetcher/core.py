@@ -288,7 +288,7 @@ def remove_flat_traces(waveforms_id, traces, txt):
             % (txt, net_sta_loc, tr.id)
         )
         traces.remove(tr)
-        cleanup_waveforms_id(waveforms_id, tr.id)
+        waveforms_id = cleanup_waveforms_id(waveforms_id, tr.id)
 
     return waveforms_id
 
