@@ -14,9 +14,11 @@ import urllib.parse
 import urllib.error
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from types import SimpleNamespace
 
 from obspy import Inventory
-from obspy import Stream, read_events
+from obspy import Stream, read_events, UTCDateTime
+from obspy.core.event import Event as ObsPyEvent, Origin
 from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
@@ -429,7 +431,8 @@ class EventFetcher(object):
         write_cache_format="pickle",
         fdsn_debug=False,
         log_level=logging.INFO,
-        fdsn_max_workers=4,
+        fdsn_max_workers=1,
+        virtual_event=None,
     ):
         logger.setLevel(log_level)
         self.st = None
@@ -448,6 +451,18 @@ class EventFetcher(object):
         self.enable_write_cache = enable_write_cache
         self.write_cache_format = write_cache_format
         self.fdsn_max_workers = max(1, int(fdsn_max_workers or 1))
+        if virtual_event and not isinstance(virtual_event, SimpleNamespace):
+            self.virtual_event = SimpleNamespace(
+                latitude=virtual_event.get("latitude"),
+                longitude=virtual_event.get("longitude"),
+                time=virtual_event.get("time"),
+                depth=virtual_event.get("depth", 0.0),
+                magnitude=virtual_event.get("magnitude"),
+                magnitude_type=virtual_event.get("magnitude_type"),
+                event_type=virtual_event.get("event_type", "not_existing"),
+            )
+        else:
+            self.virtual_event = virtual_event
         # fdsn or sds or inventory
         self.inventory = inventory
         self.sds = sds
@@ -487,6 +502,12 @@ class EventFetcher(object):
 
         self.event = EventInfo()
         self.event.id = event_id
+        if self.virtual_event and self.use_only_trace_with_weighted_arrival:
+            logger.warning(
+                "%s: Virtual event provided -> disabling use_only_trace_with_weighted_arrival.",
+                self.event.id,
+            )
+            self.use_only_trace_with_weighted_arrival = False
         self._fetch_data(waveforms_id=waveforms_id)
 
         self.get_picks()
@@ -542,55 +563,49 @@ class EventFetcher(object):
         cat = None
         fetch_from_cache_success = None
 
-        if self.enable_read_cache:
-            if os.path.isfile(self.backup_event_file):
-                logger.debug(
-                    "Fetching event %s from file %s.",
-                    self.event.id,
-                    self.backup_event_file,
+        if self.virtual_event:
+            self.event.qml = self._build_virtual_event()
+        else:
+            if self.enable_read_cache:
+                if os.path.isfile(self.backup_event_file):
+                    logger.debug(
+                        "Fetching event %s from file %s.",
+                        self.event.id,
+                        self.backup_event_file,
+                    )
+                    cat = read_events(self.backup_event_file)
+                    fetch_from_cache_success = True
+                else:
+                    logger.debug(
+                        "Trying to fetch event %s from file. But %s does not exist!",
+                        self.event.id,
+                        self.backup_event_file,
+                    )
+                    fetch_from_cache_success = False
+
+            if not self.enable_read_cache or not fetch_from_cache_success:
+                self.event_client = Client(
+                    debug=self.fdsn_debug,
+                    service_mappings={
+                        "event": self.ws_event_url,
+                        "dataselect": None,
+                        "station": None,
+                    },
                 )
-                cat = read_events(self.backup_event_file)
-                fetch_from_cache_success = True
-            else:
-                logger.debug(
-                    "Trying to fetch event %s from file. But %s does not exist!",
-                    self.event.id,
-                    self.backup_event_file,
-                )
-                fetch_from_cache_success = False
 
-        if not self.enable_read_cache or not fetch_from_cache_success:
-            self.event_client = Client(
-                debug=self.fdsn_debug,
-                service_mappings={
-                    "event": self.ws_event_url,
-                    "dataselect": None,
-                    "station": None,
-                },
-            )
+                logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
+                cat = self.get_event()
 
-            logger.debug("Fetching event %s from FDSN-WS.", self.event.id)
-            cat = self.get_event()
+            if not cat:
+                return
 
-        if not cat:
-            return
+            try:
+                self.event.qml = cat.events[0]
+            except Exception as e:
+                logger.error("%s %s", self.event.id, e)
+                return
 
-        try:
-            self.event.qml = cat.events[0]
-        except Exception as e:
-            logger.error("%s %s", self.event.id, e)
-            return
-
-        (
-            self.event.latitude,
-            self.event.longitude,
-            self.event.depth,
-        ) = self.get_event_coordinates(self.event.qml)
-        self.event.T0 = self.get_event_time(self.event.qml)
-        self.event.event_type = self.get_event_type(self.event.qml)
-        self.event.magnitude = self.get_magnitude(self.event.qml)
-        self.event.magnitude_type = self.get_magnitude_type(self.event.qml)
-        logger.debug(self.event)
+        self._populate_event_metadata()
 
         if waveforms_id:
             self.waveforms_id = waveforms_id
@@ -660,6 +675,53 @@ class EventFetcher(object):
 
         if self.st == []:
             logger.warning("No traces (%s)!" % self.event.id)
+
+    def _populate_event_metadata(self):
+        """Fill EventInfo from the current ObsPy event."""
+        if not self.event.qml:
+            return
+        origin = self.event.qml.preferred_origin()
+        if origin is None and self.event.qml.origins:
+            origin = self.event.qml.origins[0]
+        if origin is None:
+            logger.error("%s: No origin information found.", self.event.id)
+            return
+
+        self.event.latitude = origin.latitude
+        self.event.longitude = origin.longitude
+        self.event.depth = origin.depth / 1000.0 if origin.depth is not None else None
+        self.event.T0 = origin.time
+        self.event.event_type = self.get_event_type(self.event.qml)
+        self.event.magnitude = self.get_magnitude(self.event.qml)
+        self.event.magnitude_type = self.get_magnitude_type(self.event.qml)
+        logger.debug(self.event)
+
+    def _build_virtual_event(self):
+        """Create an ObsPy Event from CLI-provided virtual event metadata."""
+        if not self.virtual_event:
+            return None
+
+        evt = ObsPyEvent()
+        origin = Origin()
+        origin.latitude = self.virtual_event.latitude
+        origin.longitude = self.virtual_event.longitude
+        origin.depth = getattr(self.virtual_event, "depth", 0.0) * 1000.0
+        event_time = getattr(self.virtual_event, "time", None)
+        if event_time is None:
+            raise ValueError("Virtual event requires a time reference.")
+        origin.time = (
+            event_time if isinstance(event_time, UTCDateTime) else UTCDateTime(event_time)
+        )
+        evt.origins = [origin]
+        evt.preferred_origin_id = origin.resource_id
+
+        raw_event_type = getattr(self.virtual_event, "event_type", None)
+        if not raw_event_type:
+            event_type = "not existing"
+        else:
+            event_type = str(raw_event_type).replace("_", " ").lower()
+        evt.event_type = event_type
+        return evt
 
     def _set_extraction_time_window(self):
         """Set time window for trace extraction"""
@@ -1317,12 +1379,21 @@ def _test(event_id):
         logger.info(mydata.st.__str__(extended=True))
 
 
-def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
-    # force eventid_id
-    if not event_id:
-        event_id = urllib.parse.quote(conf["event_id"], safe="")
-    else:
-        event_id = urllib.parse.quote(event_id, safe="")
+def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_event=None) -> bool:
+    # determine event identifier (from args, config, or virtual event fallback)
+    raw_event_id = event_id or conf.get("event_id")
+    if not raw_event_id:
+        if virtual_event:
+            vt = virtual_event.get("time")
+            if isinstance(vt, UTCDateTime):
+                vt_str = vt.strftime("%Y%m%d%H%M%S")
+            else:
+                vt_str = str(vt)
+            raw_event_id = f"virtual{vt_str}"
+        else:
+            logger.error("eventid must be set (in yaml file or using option -e eventid) !")
+            sys.exit(255)
+    event_id = urllib.parse.quote(str(raw_event_id), safe="")
 
     # force fdsn ws
     fdsnws_cfg = conf["fdsnws"]
@@ -1341,10 +1412,6 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
     ws_event_url = url_mapping[default_url_mapping]["ws_event_url"]
     ws_station_url = url_mapping[default_url_mapping]["ws_station_url"]
     ws_dataselect_url = url_mapping[default_url_mapping]["ws_dataselect_url"]
-
-    if not event_id:
-        logger.error("eventid must be set (in yaml file or using option -e eventid) !")
-        sys.exit(255)
 
     numeric_level = getattr(logging, loglevel.upper(), None)
     if not numeric_level:
@@ -1384,6 +1451,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
         write_cache_format=conf["output"]["write_cache_format"],
         log_level=numeric_level,
         fdsn_max_workers=conf.get("fdsn_max_workers", 1),
+        virtual_event=virtual_event,
     )
 
     if not mydata.st:
@@ -1511,11 +1579,35 @@ def main():
         help="enable denoising",
         action="store_true",
     )
+    parser.add_argument(
+        "--virtual-lat",
+        dest="virtual_latitude",
+        type=float,
+        default=None,
+        help="Latitude (deg) for a virtual event origin.",
+    )
+    parser.add_argument(
+        "--virtual-lon",
+        dest="virtual_longitude",
+        type=float,
+        default=None,
+        help="Longitude (deg) for a virtual event origin.",
+    )
+    parser.add_argument(
+        "--virtual-time",
+        dest="virtual_time",
+        type=str,
+        default=None,
+        help="Origin time (UTC, ISO format) for a virtual event.",
+    )
+    parser.add_argument(
+        "--station-max-dist",
+        dest="cli_station_max_dist",
+        type=float,
+        default=None,
+        help="Override station_max_dist_km from configuration (km).",
+    )
     args = parser.parse_args()
-
-    if not args.eventid:
-        parser.print_help()
-        sys.exit(255)
 
     if not args.conf_file:
         logger.error("Configuration file is required (-c/--conf)")
@@ -1526,6 +1618,35 @@ def main():
 
     if not conf:
         sys.exit()
+
+    virtual_event = None
+    virtual_flags = (
+        args.virtual_latitude,
+        args.virtual_longitude,
+        args.virtual_time,
+    )
+    if any(v is not None for v in virtual_flags):
+        if None in virtual_flags:
+            logger.error(
+                "Options --virtual-lat, --virtual-lon and --virtual-time must be provided together."
+            )
+            sys.exit(255)
+        try:
+            virtual_time = UTCDateTime(args.virtual_time)
+        except Exception as exc:
+            logger.error("Invalid --virtual-time value: %s", exc)
+            sys.exit(255)
+        virtual_event = {
+            "latitude": args.virtual_latitude,
+            "longitude": args.virtual_longitude,
+            "time": virtual_time,
+        }
+    if args.eventid and virtual_event is not None:
+        logger.error("Options -e/--eventid and --virtual-* are mutually exclusive.")
+        sys.exit(255)
+    if not args.eventid and virtual_event is None:
+        parser.print_help()
+        sys.exit(255)
 
     if args.output_dirname:
         # check if output directory is empty
@@ -1544,7 +1665,16 @@ def main():
     else:
         conf["enable_denoising"] = False
 
-    retcode = _get_data(conf, args.eventid, args.fdsn_profile, args.loglevel)
+    if args.cli_station_max_dist is not None:
+        conf["station_max_dist_km"] = args.cli_station_max_dist
+
+    retcode = _get_data(
+        conf,
+        args.eventid,
+        args.fdsn_profile,
+        args.loglevel,
+        virtual_event=virtual_event,
+    )
     if not retcode:
         sys.exit(1)
     else:
