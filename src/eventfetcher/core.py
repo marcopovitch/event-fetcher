@@ -13,6 +13,7 @@ import yaml
 import urllib.parse
 import urllib.error
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from obspy import Inventory
 from obspy import Stream, read_events
@@ -24,6 +25,18 @@ from obspy.geodetics import gps2dist_azimuth
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.DEBUG)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Tag '.*' has a value of NaN\. It will be skipped\.",
+    category=UserWarning,
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Found more than one matching channel metadata. Returning first.",
+    category=UserWarning,
+)
 
 
 def phasenet_dump(traces, directory):
@@ -221,15 +234,13 @@ def filter_out_station_without_3channels(
         else:
             w = ".".join((net, sta, loc, chan))
             logger.debug(
-                "[%s] Filtering out %s (only %d channel(s))"
-                % (txt, w, len(channels))
+                "[%s] Filtering out %s (only %d channel(s))" % (txt, w, len(channels))
             )
             waveforms_to_remove.append((net, sta))
 
     # Remove waveforms in batch (avoid modifying list while iterating)
     for net, sta in waveforms_to_remove:
-        waveforms_id = [w for w in waveforms_id
-                        if not (w.startswith(f"{net}.{sta}."))]
+        waveforms_id = [w for w in waveforms_id if not (w.startswith(f"{net}.{sta}."))]
 
     return waveforms_id, tmp_bulk
 
@@ -245,6 +256,7 @@ def filter_out_station_by_distance(
         try:
             coord = inventory.get_coordinates(w, t)
         except Exception as e:
+            # No matching channel metadata found
             logger.error("[%s] %s (%s, %s): %s", event.id, w, t1, t2, e)
             continue
 
@@ -296,17 +308,13 @@ def _build_channel_rate_map(df_inventory):
     channel_rates_exact = {}
     channel_rates_station = {}
     for row in df_inventory.itertuples(index=False):
-        key_exact = (
-            (row.Network, row.Station, row.Location, row.Channel)
-        )
+        key_exact = (row.Network, row.Station, row.Location, row.Channel)
         channel_rates_exact[key_exact] = row.SampleRate
 
         key_station = (row.Network, row.Station, row.Channel)
         current = channel_rates_station.get(key_station)
         rate_value = row.SampleRate
-        if current is None or (
-            rate_value is not None and rate_value > current
-        ):
+        if current is None or (rate_value is not None and rate_value > current):
             channel_rates_station[key_station] = rate_value
 
     return {"exact": channel_rates_exact, "station": channel_rates_station}
@@ -381,7 +389,9 @@ class EventInfo(object):
     def __str__(self):
         if self.latitude is None or self.longitude is None or self.depth is None:
             return f"event_id={self.id}, incomplete data: {self.__dict__}"
-        mag_str = f"{self.magnitude:.2f} {self.magnitude_type}" if self.magnitude else "N/A"
+        mag_str = (
+            f"{self.magnitude:.2f} {self.magnitude_type}" if self.magnitude else "N/A"
+        )
         return (
             f"event_id={self.id}, {self.event_type}\n"
             f"T0={self.T0}, lat={self.latitude:.5f}, lon={self.longitude:.5f}, depth_km={self.depth:.1f}\n"
@@ -419,6 +429,7 @@ class EventFetcher(object):
         write_cache_format="pickle",
         fdsn_debug=False,
         log_level=logging.INFO,
+        fdsn_max_workers=4,
     ):
         logger.setLevel(log_level)
         self.st = None
@@ -436,6 +447,7 @@ class EventFetcher(object):
         self.enable_read_cache = enable_read_cache
         self.enable_write_cache = enable_write_cache
         self.write_cache_format = write_cache_format
+        self.fdsn_max_workers = max(1, int(fdsn_max_workers or 1))
         # fdsn or sds or inventory
         self.inventory = inventory
         self.sds = sds
@@ -628,16 +640,7 @@ class EventFetcher(object):
             # configuring 3 differents urls doesn't work.
             # we have to split in 2 Fdsn clients trace and event
             if not self.trace_client:
-                self.trace_client = Client(
-                    debug=self.fdsn_debug,
-                    base_url=self.base_url,
-                    service_mappings={
-                        "event": None,
-                        "dataselect": self.ws_dataselect_url,
-                        "station": self.ws_station_url,
-                    },
-                    timeout=300,
-                )
+                self.trace_client = self._create_trace_client()
 
             # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
             if self.sds:
@@ -712,7 +715,7 @@ class EventFetcher(object):
                 _is_pattern_blacklisting_waveform(b, w)
                 for b in self.black_listed_waveforms_id
             ):
-                logger.info(f"{self.event.id}: ignoring black listed {w} !")
+                logger.debug(f"{self.event.id}: ignoring black listed {w} !")
                 continue
             filtered.append(w)
         return filtered
@@ -724,6 +727,62 @@ class EventFetcher(object):
             net, sta, loc, chan = w.split(".")
             bulk.append((net, sta, loc, chan, starttime, endtime))
         return bulk
+
+    def _group_bulk_by_station(self, bulk):
+        """Return bulk sublists grouping all channels of the same station/location."""
+        station_groups = {}
+        for entry in bulk:
+            key = entry[:3]  # (network, station, location)
+            station_groups.setdefault(key, []).append(entry)
+        return list(station_groups.values())
+
+    def _fetch_bulk_chunk(self, chunk):
+        """Fetch a subset of bulk entries using a dedicated FDSN client."""
+        client = self._create_trace_client()
+        return client.get_waveforms_bulk(chunk, attach_response=False)
+
+    def _parallel_get_waveforms_bulk(self, bulk):
+        grouped = self._group_bulk_by_station(bulk)
+        if not grouped:
+            return Stream()
+
+        traces = Stream()
+        with ThreadPoolExecutor(max_workers=self.fdsn_max_workers) as executor:
+            future_map = {
+                executor.submit(self._fetch_bulk_chunk, chunk): chunk
+                for chunk in grouped
+            }
+            for future in as_completed(future_map):
+                chunk = future_map[future]
+                try:
+                    stream = future.result()
+                except Exception as exc:
+                    net, sta, loc = chunk[0][:3]
+                    logger.debug(
+                        "%s: FDSN bulk chunk failed for %s.%s.%s (%s)",
+                        self.event.id,
+                        net,
+                        sta,
+                        loc,
+                        exc,
+                    )
+                    continue
+                if stream:
+                    traces += stream
+        return traces
+
+    def _create_trace_client(self):
+        """Instantiate a new FDSN client configured for trace fetching."""
+        return Client(
+            debug=self.fdsn_debug,
+            base_url=self.base_url,
+            service_mappings={
+                "event": None,
+                "dataselect": self.ws_dataselect_url,
+                "station": self.ws_station_url,
+            },
+            timeout=300,
+        )
 
     def _fetch_inventory_for_waveforms(self, waveforms, starttime, endtime):
         logger.debug(f"{self.event.id}: getting station inventory ...")
@@ -776,7 +835,10 @@ class EventFetcher(object):
                 elif rate_cmp == current["rate"]:
                     if instrument_prio > current["instrument_prio"]:
                         replace = True
-                    elif instrument_prio == current["instrument_prio"] and chan > current["chan"]:
+                    elif (
+                        instrument_prio == current["instrument_prio"]
+                        and chan > current["chan"]
+                    ):
                         replace = True
             if replace:
                 best_waveforms[key] = {
@@ -802,16 +864,18 @@ class EventFetcher(object):
             self.waveforms_id = preferred_waveforms
 
     def get_trace_bulk(self, starttime, endtime):
-        """Workflow: 
-            blacklist filtering  
-            inventory fetch 
-            rate-based pruning 
-            bulk download.
+        """Workflow:
+        blacklist filtering
+        inventory fetch
+        rate-based pruning
+        bulk download.
         """
         logger.debug(f"{self.event.id}: building station list ...")
         self.waveforms_id = self._filter_blacklisted_waveforms()
         if not self.waveforms_id:
-            logger.warning("%s: All waveforms filtered out by blacklist.", self.event.id)
+            logger.warning(
+                "%s: All waveforms filtered out by blacklist.", self.event.id
+            )
             return Stream()
 
         inventory = self._fetch_inventory_for_waveforms(
@@ -857,9 +921,12 @@ class EventFetcher(object):
             # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
             traces = self.trace_client_sds.get_waveforms_bulk(bulk)
         else:
-            traces = self.trace_client.get_waveforms_bulk(
-                bulk, attach_response=False
-            )
+            if self.fdsn_max_workers > 1:
+                traces = self._parallel_get_waveforms_bulk(bulk)
+            else:
+                traces = self.trace_client.get_waveforms_bulk(
+                    bulk, attach_response=False
+                )
 
         # merge multiple segments if any
         try:
@@ -1316,6 +1383,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO") -> bool:
         enable_read_cache=conf["output"]["enable_read_cache"],
         write_cache_format=conf["output"]["write_cache_format"],
         log_level=numeric_level,
+        fdsn_max_workers=conf.get("fdsn_max_workers", 1),
     )
 
     if not mydata.st:
@@ -1346,9 +1414,7 @@ def denoise_stream(stream, model_name=None, preprocess=True):
         raise ValueError("Model name must be 'dae', 'original' or 'urban'")
 
     if model_name == "dae":
-        raise NotImplementedError(
-            "Denoising with DAE model is deactivated for now."
-        )
+        raise NotImplementedError("Denoising with DAE model is deactivated for now.")
 
     st = stream.copy()
 
@@ -1360,6 +1426,7 @@ def denoise_stream(stream, model_name=None, preprocess=True):
     # Lazy import and cache the model (loaded once per model_name)
     if model_name not in _denoise_models:
         import seisbench.models as sbm
+
         logger.info(f"Loading DeepDenoiser model '{model_name}'...")
         _denoise_models[model_name] = sbm.DeepDenoiser.from_pretrained(model_name)
 
@@ -1473,9 +1540,7 @@ def main():
 
     if args.denoise:
         conf["enable_denoising"] = True
-        raise NotImplementedError(
-            "Denoising is deactivated for now."
-        )
+        raise NotImplementedError("Denoising is deactivated for now.")
     else:
         conf["enable_denoising"] = False
 

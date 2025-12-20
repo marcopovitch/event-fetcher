@@ -17,6 +17,9 @@ use_only_trace_with_weighted_arrival: False
 # ... or get all stations within this radius from epicenter
 station_max_dist_km: 350
 
+# maximum number of parallel FDSN dataselect workers (>=1)
+fdsn_max_workers: 4
+
 # list of black listed waveform ids ["NET.STA.LOC.CHAN", ... ]
 black_listed_waveforms_id: ["XX.GPIL", "XX.GP*", "1K.EO*"]
 #black_listed_waveforms_id: []
