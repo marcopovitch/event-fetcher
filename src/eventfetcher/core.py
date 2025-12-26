@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 
 from obspy import Inventory
-from obspy import Stream, read_events, UTCDateTime
+from obspy import Stream, read_events, UTCDateTime, Catalog
 from obspy.core.event import Event as ObsPyEvent, Origin
 from obspy.clients.fdsn import Client
 from obspy.clients.filesystem.sds import Client as ClientSDS
@@ -565,6 +565,20 @@ class EventFetcher(object):
 
         if self.virtual_event:
             self.event.qml = self._build_virtual_event()
+            if self.event.qml:
+                catalog = Catalog(events=[self.event.qml])
+                try:
+                    catalog.write(self.backup_event_file, format="QUAKEML")
+                    logger.debug(
+                        "Virtual event written to %s",
+                        self.backup_event_file,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to write virtual event QuakeML (%s): %s",
+                        self.backup_event_file,
+                        exc,
+                    )
         else:
             if self.enable_read_cache:
                 if os.path.isfile(self.backup_event_file):
