@@ -3,9 +3,9 @@ import fnmatch
 import os
 import _pickle as cPickle
 import logging
-import os.path
 import re
 import sys
+import time
 import warnings
 import numpy as np
 import argparse
@@ -15,11 +15,13 @@ import urllib.error
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
+from typing import Optional
 
 from obspy import Inventory
 from obspy import Stream, read_events, UTCDateTime, Catalog
 from obspy.core.event import Event as ObsPyEvent, Origin
 from obspy.clients.fdsn import Client
+from obspy.clients.fdsn.header import FDSNNoDataException
 from obspy.clients.filesystem.sds import Client as ClientSDS
 from obspy.geodetics import gps2dist_azimuth
 
@@ -91,29 +93,6 @@ def phasenet_dump(traces, directory):
             )
 
 
-def mseed_dump_by_trace(traces, directory):
-    """
-    Dump traces to MiniSEED files.
-
-    Args:
-        traces (list): List of traces to be dumped.
-        directory (str): Directory path where the MiniSEED files will be saved.
-    """
-    logger.info("Mseed dump:")
-    os.makedirs(directory, exist_ok=True)
-    logger.debug("Directory '%s' created successfully." % directory)
-
-    for tr in traces:
-        stats = tr.stats
-        filename = os.path.join(
-            directory,
-            f"{stats.network}.{stats.station}.{stats.location}.{stats.channel}.{stats.starttime}.{stats.endtime}",
-        )
-        tr.write(filename + ".mseed", format="MSEED")
-        if stats.response:
-            stats.response.write(filename + ".xml", format="STATIONXML")
-
-
 def mseed_dump_by_station(traces, directory):
     """
     Dump station traces to MiniSEED files and corresponding StationXML files.
@@ -162,7 +141,7 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
                 channel_info = {
                     "Network": network.code,
                     "Station": station.code,
-                    "Location": channel.location_code,
+                    "Location": channel.location_code or "",
                     "Channel": channel.code,
                     "Latitude": station.latitude,
                     "Longitude": station.longitude,
@@ -196,23 +175,58 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
 
     df = df.drop_duplicates()
 
+    # Sort for deterministic ordering regardless of FDSN response order
+    df = df.sort_values(
+        by=["Network", "Station", "Location", "Channel"]
+    ).reset_index(drop=True)
+
     return df
 
 
-def _build_station_channel_cache(full_df: pd.DataFrame) -> dict:
+def _build_station_channel_cache(
+    full_df: pd.DataFrame, reference_time: Optional[UTCDateTime] = None
+) -> dict:
     """Pre-compute available channels per station for fast lookups."""
+    df = full_df.copy()
+
+    if reference_time:
+        ref_ts = pd.to_datetime(str(reference_time))
+        df["StartTime"] = pd.to_datetime(df["StartTime"], errors="coerce")
+        df["EndTime"] = pd.to_datetime(df["EndTime"], errors="coerce")
+        time_mask = (df["StartTime"].isna() | (df["StartTime"] <= ref_ts)) & (
+            df["EndTime"].isna() | (ref_ts <= df["EndTime"])
+        )
+        df = df[time_mask]
+
     station_cache = {}
-    grouped = full_df.groupby(["Network", "Station", "Location"], sort=False)
+    if df.empty:
+        logger.debug("No metadata after filtering at %s", reference_time)
+        return station_cache
+
+    grouped = df.groupby(["Network", "Station", "Location"], sort=True)
     for key, group in grouped:
         max_sample_rate = group["SampleRate"].max()
         filtered = group[group["SampleRate"] == max_sample_rate]
-        filtered = filtered.sort_values(by="StartTime").head(3)
+        # Sort by StartTime then Channel for deterministic ordering
+        filtered = filtered.sort_values(by=["StartTime", "Channel"]).head(3)
+        logger.debug(
+            "Metadata cache %s: %d channel(s) kept (max rate=%s) at %s",
+            ".".join(key),
+            len(filtered),
+            max_sample_rate,
+            reference_time,
+        )
         station_cache[key] = filtered["Channel"].tolist()
     return station_cache
 
 
 def filter_out_station_without_3channels(
-    waveforms_id, bulk, inventory, txt, inventory_df=None
+    waveforms_id,
+    bulk,
+    inventory,
+    txt,
+    inventory_df=None,
+    reference_time: Optional[UTCDateTime] = None,
 ):
     # Convert inventory to dataframe once (performance optimization)
     full_df = inventory_df if inventory_df is not None else inventory2df(inventory)
@@ -220,16 +234,35 @@ def filter_out_station_without_3channels(
         logger.error(f"[{txt}] No metadata in inventory")
         return waveforms_id, []
 
-    station_cache = _build_station_channel_cache(full_df)
+    station_cache = _build_station_channel_cache(
+        full_df, reference_time=reference_time
+    )
     tmp_bulk = []
     waveforms_to_remove = []
 
     for net, sta, loc, chan, t1, t2 in bulk:
         channels = station_cache.get((net, sta, loc))
         if not channels:
-            logger.error(f"No metadata for {net}.{sta}.{loc}.{chan}")
+            logger.error(
+                "[%s] No metadata for %s.%s.%s.%s at %s",
+                txt,
+                net,
+                sta,
+                loc,
+                chan,
+                reference_time,
+            )
             continue
 
+        logger.debug(
+            "[%s] Channels for %s.%s.%s at %s -> %s",
+            txt,
+            net,
+            sta,
+            loc,
+            reference_time,
+            channels,
+        )
         chan = channels[0][:2] + "?"
         if len(channels) == 3:
             tmp_bulk.append((net, sta, loc, chan, t1, t2))
@@ -238,11 +271,15 @@ def filter_out_station_without_3channels(
             logger.debug(
                 "[%s] Filtering out %s (only %d channel(s))" % (txt, w, len(channels))
             )
-            waveforms_to_remove.append((net, sta))
+            waveforms_to_remove.append((net, sta, loc))
+            for ch in channels:
+                logger.debug("[%s] Retained channel candidate %s", txt, ch)
 
     # Remove waveforms in batch (avoid modifying list while iterating)
-    for net, sta in waveforms_to_remove:
-        waveforms_id = [w for w in waveforms_id if not (w.startswith(f"{net}.{sta}."))]
+    # Only remove the specific location, not all locations for this station
+    for net, sta, loc in waveforms_to_remove:
+        prefix = f"{net}.{sta}.{loc}."
+        waveforms_id = [w for w in waveforms_id if not w.startswith(prefix)]
 
     return waveforms_id, tmp_bulk
 
@@ -253,14 +290,30 @@ def filter_out_station_by_distance(
     tmp_bulk = []
     for net, sta, loc, chan, t1, t2 in bulk:
         tmpchan = chan[:-1] + "Z"
-        w = ".".join((net, sta, loc, tmpchan))
         t = t1 + (t2 - t1) / 2.0
-        try:
-            coord = inventory.get_coordinates(w, t)
-        except Exception as e:
-            # No matching channel metadata found
-            logger.error("[%s] %s (%s, %s): %s", event.id, w, t1, t2, e)
+
+        coord, inspected = _find_channel_coordinates(
+            inventory, net, sta, loc, tmpchan, t
+        )
+        if coord is None:
+            logger.error(
+                "[%s] No metadata matching %s.%s.%s.%s at %s. inspected=%s",
+                event.id,
+                net,
+                sta,
+                loc or "--",
+                tmpchan,
+                t,
+                [
+                    f"{cha.location_code or '--'}.{cha.code}"
+                    f"[{cha.start_date}->{cha.end_date}]"
+                    for cha in inspected
+                ]
+                or "empty",
+            )
             continue
+        resolved_loc = coord.get("location_code", loc) or loc or ""
+        w = ".".join((net, sta, resolved_loc, tmpchan))
 
         distance, az, baz = gps2dist_azimuth(
             coord["latitude"],
@@ -270,24 +323,59 @@ def filter_out_station_by_distance(
         )
         # distance in meters, convert it to km
         distance = distance / 1000.0
+
         if distance <= station_max_dist_km:
-            tmp_bulk.append((net, sta, loc, chan, t1, t2))
+            tmp_bulk.append((net, sta, resolved_loc, chan, t1, t2))
         else:
             logger.debug(
                 "Filtering out %s (dist(%.1f) > %.1f)"
                 % (w, distance, station_max_dist_km)
             )
-            waveform_id = ".".join((net, sta, loc, chan))
+            waveform_id = ".".join((net, sta, resolved_loc, chan))
             waveforms_id = cleanup_waveforms_id(waveforms_id, waveform_id)
     return waveforms_id, tmp_bulk
 
 
 def cleanup_waveforms_id(waveforms_id, waveform_id):
-    """Remove all waveform IDs matching the same network.station."""
-    net, sta, _, _ = waveform_id.split(".")
-    prefix = f"{net}.{sta}."
+    """Remove all waveform IDs matching the same network.station.location."""
+    net, sta, loc, _ = waveform_id.split(".")
+    prefix = f"{net}.{sta}.{loc}."
     # Use list comprehension instead of remove() in loop (O(n) vs O(n²))
     return [wid for wid in waveforms_id if not wid.startswith(prefix)]
+
+
+def _loc_candidates(loc_code):
+    if loc_code and loc_code != "--":
+        return [loc_code]
+    return ["", "00", "01"]
+
+
+def _find_channel_coordinates(inventory, net, sta, loc, channel, time):
+    """Return coordinates dict and inspected channels for diagnostics."""
+    inspected_channels = []
+    for loc_candidate in _loc_candidates(loc):
+        loc_filter = loc_candidate or "*"
+        inv = inventory.select(
+            network=net, station=sta, location=loc_filter, channel=channel
+        )
+        for net_obj in inv or []:
+            for sta_obj in net_obj:
+                for cha in sta_obj:
+                    if cha.code != channel:
+                        continue
+                    inspected_channels.append(cha)
+                    start_ok = cha.start_date is None or cha.start_date <= time
+                    end_ok = cha.end_date is None or time <= cha.end_date
+                    if start_ok and end_ok:
+                        return (
+                            {
+                                "latitude": cha.latitude,
+                                "longitude": cha.longitude,
+                                "location_code": cha.location_code or "",
+                            },
+                            inspected_channels,
+                        )
+    return None, inspected_channels
 
 
 def _is_pattern_blacklisting_waveform(pattern, waveform_id):
@@ -331,13 +419,14 @@ def remove_flat_traces(waveforms_id, traces, txt):
         if variance < tolerance:
             traces_to_remove.append(trace)
 
+    # Remove traces with flat data using list comprehension
+    traces[:] = [tr for tr in traces if tr not in traces_to_remove]
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
         logger.warning(
             "[%s] Flat channel for %s detected: removing trace %s"
             % (txt, net_sta_loc, tr.id)
         )
-        traces.remove(tr)
         waveforms_id = cleanup_waveforms_id(waveforms_id, tr.id)
 
     return waveforms_id
@@ -355,12 +444,13 @@ def remove_traces_without_3channels(waveforms_id, traces, txt):
         if len(grouped_traces) != 3:
             traces_to_remove.extend(grouped_traces)
 
+    # Remove traces without 3 channels using list comprehension
+    traces[:] = [tr for tr in traces if tr not in traces_to_remove]
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
         logger.warning(
             "[%s] Missing channel for %s: removing trace %s" % (txt, net_sta_loc, tr.id)
         )
-        traces.remove(tr)
         waveforms_id = cleanup_waveforms_id(waveforms_id, tr.id)
 
     return waveforms_id
@@ -433,6 +523,7 @@ class EventFetcher(object):
         log_level=logging.INFO,
         fdsn_max_workers=1,
         virtual_event=None,
+        fdsn_timeout=300,
     ):
         logger.setLevel(log_level)
         self.st = None
@@ -451,6 +542,7 @@ class EventFetcher(object):
         self.enable_write_cache = enable_write_cache
         self.write_cache_format = write_cache_format
         self.fdsn_max_workers = max(1, int(fdsn_max_workers or 1))
+        self.fdsn_timeout = fdsn_timeout
         if virtual_event and not isinstance(virtual_event, SimpleNamespace):
             self.virtual_event = SimpleNamespace(
                 latitude=virtual_event.get("latitude"),
@@ -483,7 +575,7 @@ class EventFetcher(object):
             try:
                 os.makedirs(cache_dir, exist_ok=True)
                 logger.debug("set up %s as cache directory", cache_dir)
-            except Exception as e:
+            except OSError as e:
                 logger.error("Can't create cache directory '%s' (%s) !", cache_dir, e)
                 self.event = EventInfo()
                 return
@@ -514,7 +606,7 @@ class EventFetcher(object):
         if self.st is None:
             self.st = []
             return
-        elif self.st == []:
+        elif not self.st:
             return
 
         self.compute_distance_az_baz()
@@ -553,7 +645,7 @@ class EventFetcher(object):
 
         if self.st:
             self.st.sort()
-            if logger.level == logging.DEBUG:
+            if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(self.st.__str__(extended=True))
         else:
             logger.warning("No trace (%s) in _fetch_data() !", self.event.id)
@@ -687,7 +779,7 @@ class EventFetcher(object):
             self.st = denoise_stream(self.st, model_name=self.denoise_model)
             logger.debug(self.st)
 
-        if self.st == []:
+        if not self.st:
             logger.warning("No traces (%s)!" % self.event.id)
 
     def _populate_event_metadata(self):
@@ -741,6 +833,10 @@ class EventFetcher(object):
         """Set time window for trace extraction"""
         if self.starttime is None:
             self.starttime = self.event.T0
+        if self.starttime is None:
+            raise ValueError(
+                f"Cannot set extraction time window: no starttime and no event T0 for {self.event.id}"
+            )
         self.starttime += self.starttime_offset
 
         if self.endtime is None:
@@ -763,26 +859,17 @@ class EventFetcher(object):
 
     def _hack_streams(self, waveforms_ids):
         """Normalize waveform ids and ensure we request all components."""
-        wfid_list = set()
+        seen = set()
+        wfid_list = []
         for w in waveforms_ids:
             w_fixed = self._hack_P_stream(w)
             net, sta, loc, chan = w_fixed.split(".")
             chan = chan[:2] + "?"
-            wfid_list.add(".".join([net, sta, loc, chan]))
-        return list(wfid_list)
-
-    def _remove_from_stream(self, waveforms_id_list):
-        for wfid in waveforms_id_list:
-            net, sta, loc, chan = wfid.split(".")
-            for tr in self.st.select(
-                network=net, station=sta, location=loc, channel=chan
-            ):
-                try:
-                    self.st.remove(tr)
-                except Exception as e:
-                    logger.debug(f"Can't remove trace {wfid} ({e})")
-                else:
-                    logger.debug(f"Removed black listed trace fid {wfid}")
+            wfid = ".".join([net, sta, loc, chan])
+            if wfid not in seen:
+                seen.add(wfid)
+                wfid_list.append(wfid)
+        return wfid_list
 
     def _filter_blacklisted_waveforms(self):
         filtered = []
@@ -812,10 +899,97 @@ class EventFetcher(object):
             station_groups.setdefault(key, []).append(entry)
         return list(station_groups.values())
 
+    def _get_alternative_location_codes(self, net, sta, orig_loc):
+        """Get alternative location codes from inventory for a station."""
+        loc_codes = [orig_loc]
+
+        if hasattr(self, "_inventory_df") and not self._inventory_df.empty:
+            # Query inventory for all location codes of this station
+            mask = (self._inventory_df["Network"] == net) & (
+                self._inventory_df["Station"] == sta
+            )
+            filtered_df = self._inventory_df[mask]
+            available_locs = filtered_df["Location"].drop_duplicates().tolist()
+            for loc in available_locs:
+                if loc not in loc_codes:
+                    loc_codes.append(loc)
+            logger.debug(
+                "%s: Available location codes for %s.%s from inventory: %s",
+                self.event.id,
+                net,
+                sta,
+                loc_codes,
+            )
+        return loc_codes
+
+    def _fetch_with_retry(self, chunk, max_retries=3, base_delay=1.0):
+        """Fetch bulk chunk with exponential backoff retry.
+
+        Also tries alternative location codes from inventory if the original fails with 204.
+        """
+        net, sta, orig_loc = chunk[0][:3]
+
+        # Get location codes to try from inventory
+        loc_codes_to_try = self._get_alternative_location_codes(net, sta, orig_loc)
+
+        last_exc = None
+        for loc_code in loc_codes_to_try:
+            # Build chunk with current location code
+            current_chunk = [
+                (entry[0], entry[1], loc_code, entry[3], entry[4], entry[5])
+                for entry in chunk
+            ]
+
+            for attempt in range(max_retries):
+                try:
+                    client = self._create_trace_client()
+                    result = client.get_waveforms_bulk(current_chunk, attach_response=False)
+                    if result and len(result) > 0:
+                        if loc_code != orig_loc:
+                            logger.info(
+                                "%s: Found data for %s.%s using location '%s' instead of '%s'",
+                                self.event.id, net, sta, loc_code, orig_loc
+                            )
+                        return result
+                except FDSNNoDataException:
+                    # No data for this location code, try next one immediately
+                    logger.debug(
+                        "%s: No data for %s.%s.%s, trying alternative location codes",
+                        self.event.id, net, sta, loc_code
+                    )
+                    break  # Try next location code
+                except Exception as exc:
+                    last_exc = exc
+                    # For other errors, retry with backoff
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            "%s: Retry %d/%d for %s.%s.%s after %.1fs (%s)",
+                            self.event.id,
+                            attempt + 1,
+                            max_retries,
+                            net,
+                            sta,
+                            loc_code,
+                            delay,
+                            exc,
+                        )
+                        time.sleep(delay)
+
+        # All retries and location codes failed
+        logger.error(
+            "%s: FDSN bulk failed for %s.%s (tried locations: %s) after retries: %s",
+            self.event.id,
+            net,
+            sta,
+            loc_codes_to_try,
+            last_exc,
+        )
+        return None
+
     def _fetch_bulk_chunk(self, chunk):
-        """Fetch a subset of bulk entries using a dedicated FDSN client."""
-        client = self._create_trace_client()
-        return client.get_waveforms_bulk(chunk, attach_response=False)
+        """Fetch a subset of bulk entries with retry logic."""
+        return self._fetch_with_retry(chunk)
 
     def _parallel_get_waveforms_bulk(self, bulk):
         grouped = self._group_bulk_by_station(bulk)
@@ -834,7 +1008,7 @@ class EventFetcher(object):
                     stream = future.result()
                 except Exception as exc:
                     net, sta, loc = chunk[0][:3]
-                    logger.debug(
+                    logger.warning(
                         "%s: FDSN bulk chunk failed for %s.%s.%s (%s)",
                         self.event.id,
                         net,
@@ -857,7 +1031,7 @@ class EventFetcher(object):
                 "dataselect": self.ws_dataselect_url,
                 "station": self.ws_station_url,
             },
-            timeout=300,
+            timeout=self.fdsn_timeout,
         )
 
     def _fetch_inventory_for_waveforms(self, waveforms, starttime, endtime):
@@ -875,6 +1049,7 @@ class EventFetcher(object):
                         starttime=starttime,
                         endtime=endtime,
                     )
+                    
             else:
                 bulk = self._build_bulk_entries(waveforms, starttime, endtime)
                 inventory = self.trace_client.get_stations_bulk(bulk, level="response")
@@ -888,7 +1063,12 @@ class EventFetcher(object):
         if not channel_rates["exact"] and not channel_rates["station"]:
             return
 
-        instrument_priority = {"H": 1, "N": 0}
+        # Priority for instrument type (2nd character): H=High-broadband, N=Accelerometer, E=Other/Unknown
+        instrument_priority = {"H": 2, "N": 1, "E": 0}
+        
+        # Priority for band/sample rate code (1st character):
+        # D: very high, H: high, E: extended, B: broadband, S: short period
+        sample_rate_priority = {"D": 4, "H": 3, "E": 2, "B": 2, "S": 1}
         best_waveforms = {}
         for idx, wid in enumerate(self.waveforms_id):
             net, sta, loc, chan = wid.split(".")
@@ -897,31 +1077,32 @@ class EventFetcher(object):
             if sample_rate is None:
                 sample_rate = channel_rates["station"].get((net, sta, chan))
             rate_cmp = sample_rate if sample_rate is not None else -1
-            instrument_code = chan[1] if len(chan) > 1 else ""
+            
+            # Extract instrument type from 2nd character (H in HHZ/EHZ, N in HNZ/ENZ, etc.)
+            instrument_code = chan[1] if len(chan) > 1 else "E"
             instrument_prio = instrument_priority.get(instrument_code.upper(), -1)
+            
+            # Extract sample rate type from 1st character
+            sample_rate_code = chan[0] if len(chan) > 0 else "E"
+            sample_rate_prio = sample_rate_priority.get(sample_rate_code.upper(), 0)
 
             key = (net, sta, component)
             current = best_waveforms.get(key)
-            replace = False
-            if current is None:
-                replace = True
-            else:
-                if rate_cmp > current["rate"]:
-                    replace = True
-                elif rate_cmp == current["rate"]:
-                    if instrument_prio > current["instrument_prio"]:
-                        replace = True
-                    elif (
-                        instrument_prio == current["instrument_prio"]
-                        and chan > current["chan"]
-                    ):
-                        replace = True
-            if replace:
+            # Comparaison lexicographique de tuples : compare élément par élément
+            new_priority = (rate_cmp, instrument_prio, sample_rate_prio, chan)
+            current_priority = (
+                current["rate"],
+                current["instrument_prio"],
+                current["sample_rate_prio"],
+                current["chan"],
+            ) if current else (-1, -1, -1, "")
+            if new_priority > current_priority:
                 best_waveforms[key] = {
                     "idx": idx,
                     "waveform": wid,
                     "rate": rate_cmp,
                     "instrument_prio": instrument_prio,
+                    "sample_rate_prio": sample_rate_prio,
                     "chan": chan,
                 }
 
@@ -964,6 +1145,8 @@ class EventFetcher(object):
         inventory_df["SampleRate"] = pd.to_numeric(
             inventory_df["SampleRate"], errors="coerce"
         )
+        # Store inventory_df for location code lookups during fetch
+        self._inventory_df = inventory_df
 
         self._apply_preferred_sample_rate(inventory_df)
 
@@ -979,7 +1162,12 @@ class EventFetcher(object):
         # keep only stations with 3 component (using inventory info only)
         if self.keep_only_3channels_station:
             self.waveforms_id, bulk = filter_out_station_without_3channels(
-                self.waveforms_id, bulk, inventory, self.event.id, inventory_df
+                self.waveforms_id,
+                bulk,
+                inventory,
+                self.event.id,
+                inventory_df,
+                reference_time=starttime,
             )
 
         # get rid off stations too far away
@@ -1051,99 +1239,23 @@ class EventFetcher(object):
 
         return traces
 
-    def get_trace(self, starttime, endtime):
-        """Get waveform using FDSNWS"""
-        traces = Stream()
-        for w in self.waveforms_id:
-            logger.debug("Working on %s ... ", w)
-            net, sta, loc, chan = w.split(".")
-
-            # get trace
-            logger.debug("Start to fetch trace %s [%s-%s]", w, starttime, endtime)
-            try:
-                waveform = self.trace_client.get_waveforms(
-                    net, sta, loc, chan, starttime, endtime, attach_response=False
-                )
-            except Exception as e:
-                logger.error("(get_trace/wf)%s %s", e, self.event.id)
-                continue
-
-            if not waveform:
-                logger.debug("No data for trace %s [%s-%s]", w, starttime, endtime)
-                continue
-
-            # be sure to have only one segment in trace
-            try:
-                waveform.merge(method=0, fill_value="interpolate")
-            except Exception as e:
-                logger.warning("%s %s", self.event.id, e)
-                logger.warning(waveform)
-                continue
-            else:
-                logger.debug(waveform)
-
-            # get coordinates since attach_response seems not to be enough
-            logger.debug("Start to fetch inventory for %s", w)
-            try:
-                if self.inventory:
-                    inventory = self.inventory.select(
-                        network=net,
-                        station=sta,
-                        location=loc,
-                        channel=chan,
-                        starttime=starttime,
-                        endtime=endtime,
-                    )
-                else:
-                    inventory = self.trace_client.get_stations(
-                        network=net,
-                        station=sta,
-                        location=loc,
-                        channel=chan,
-                        starttime=starttime,
-                        endtime=endtime,
-                        level="response",
-                    )
-            except Exception as e:
-                logger.error("(get_trace/inv)%s %s", e, self.event.id)
-                continue
-
-            logger.debug(inventory)
-
-            for i, _w in enumerate(waveform):
-                _stats = _w.stats
-                _wid = ".".join(
-                    [_stats.network, _stats.station, _stats.location, _stats.channel]
-                )
-                logger.debug(_wid)
-                waveform[i].stats.response = inventory
-                try:
-                    waveform[i].stats.coordinates = inventory.get_coordinates(_wid)
-                except Exception as e:
-                    logger.error("%s %s", e, self.event.id)
-                    waveform[i].stats.coordinates = None
-                logger.debug("%s: %s", _wid, waveform[i].stats.coordinates)
-
-            # store trace
-            traces += waveform
-
-        # Sync all traces to starttime
-        traces.trim(starttime=starttime, endtime=endtime)
-
-        return traces
-
     def rotate_to_RT(self):
         # make a copy and rotate traces
         # return only R and T traces
-        if not hasattr(self, "waveforms_id"):
+        if not self.st:
             return Stream()
 
+        # Build wids from actual traces (not waveforms_id) to handle
+        # location code changes during fetch
+        seen = set()
         wids = []
-        for w in self.waveforms_id:
-            logger.debug("Working on %s ... ", w)
-            net, sta, loc, chan = w.split(".")
-            wids.append(".".join((net, sta, loc, "*")))
-        wids = set(wids)
+        for tr in self.st:
+            s = tr.stats
+            wid = f"{s.network}.{s.station}.{s.location}.*"
+            if wid not in seen:
+                seen.add(wid)
+                wids.append(wid)
+                logger.debug("Working on %s ... ", wid)
 
         st_RT = Stream()
         stcopy = self.st.copy()
@@ -1167,9 +1279,14 @@ class EventFetcher(object):
             except Exception as e:
                 logger.warning("(%s) Can't rotate: %s (%s)", self.event.id, wid, e)
             else:
-                for tr in st.select(component="Z"):
-                    st.remove(tr)
-                st_RT += st
+                # Keep only R and T components
+                for tr in st:
+                    if tr.stats.channel[-1] in ("R", "T"):
+                        st_RT += tr
+                # Remove horizontal components (N, E, 1, 2) from original stream, keep Z
+                for tr in list(self.st.select(id=wid)):
+                    if tr.stats.channel[-1] != "Z":
+                        self.st.remove(tr)
 
         return st_RT
 
@@ -1198,14 +1315,6 @@ class EventFetcher(object):
                 )
                 cat.write(self.backup_event_file, format="QUAKEML")
         return cat
-
-    def get_event_coordinates(self, e):
-        o = e.preferred_origin()
-        return o.latitude, o.longitude, o.depth / 1000.0
-
-    def get_event_time(self, e):
-        o = e.preferred_origin()
-        return o.time
 
     def get_event_type(self, e):
         return e.event_type
@@ -1263,7 +1372,7 @@ class EventFetcher(object):
                     "dataselect": self.ws_dataselect_url,
                     "station": self.ws_station_url,
                 },
-                timeout=300,
+                timeout=self.fdsn_timeout,
             )
 
         try:
@@ -1297,10 +1406,15 @@ class EventFetcher(object):
         for net in inventory:
             for sta in net:
                 for chan in sta.select(channel="[SBHED][HNP]Z"):
+                    loc_code = chan.location_code or ""
                     wf_id = ".".join(
-                        [net.code, sta.code, chan.location_code, chan.code]
+                        [net.code, sta.code, loc_code, chan.code]
                     )
                     waveforms_id.append(wf_id)
+                    logger.debug(
+                        "Found station %s.%s.%s.%s within distance",
+                        net.code, sta.code, loc_code, chan.code
+                    )
         return waveforms_id
 
     def compute_distance_az_baz(self):
@@ -1332,6 +1446,8 @@ class EventFetcher(object):
                 return []
 
         o = e.preferred_origin()
+        if o is None:
+            return []
         # Build pick index for O(1) lookup
         pick_index = {p.resource_id: p for p in e.picks}
 
@@ -1357,40 +1473,6 @@ class EventFetcher(object):
     def show_pick_offset(self, e=None):
         for wfid, p, t0 in self._get_p_phase_picks(e):
             logger.debug("%s %s %s", wfid, p.time, p.time - t0)
-
-
-def _test(event_id):
-    # webservice URL
-    ws_base_url = "http://10.0.1.36"
-    ws_event_url = "http://10.0.1.36:8080/fdsnws/event/1"
-    ws_station_url = "http://10.0.1.36:8080/fdsnws/station/1"
-    ws_dataselect_url = "http://10.0.1.36:8080/fdsnws/dataselect/1"
-
-    # get data
-    mydata = EventFetcher(
-        event_id,
-        time_length=90,
-        starttime_offset=-10,
-        station_max_dist_km=200,
-        base_url=ws_base_url,
-        ws_event_url=ws_event_url,
-        ws_station_url=ws_station_url,
-        ws_dataselect_url=ws_dataselect_url,
-        use_only_trace_with_weighted_arrival=False,
-        keep_only_3channels_station=True,
-        enable_denoising=False,
-        enable_RTrotation=False,
-        backup_dirname=event_id,
-        enable_write_cache=True,
-        enable_read_cache=True,
-        write_cache_format="phasenet",
-        log_level=logging.INFO,
-    )
-
-    if not mydata.st:
-        logger.info("No data associated to event %s", event_id)
-    else:
-        logger.info(mydata.st.__str__(extended=True))
 
 
 def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_event=None) -> bool:
@@ -1631,7 +1713,8 @@ def main():
     conf = load_config(args.conf_file)
 
     if not conf:
-        sys.exit()
+        logger.error("Configuration file could not be loaded or is empty")
+        sys.exit(1)
 
     virtual_event = None
     virtual_flags = (
