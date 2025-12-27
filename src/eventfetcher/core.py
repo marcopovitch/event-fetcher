@@ -190,9 +190,13 @@ def _build_station_channel_cache(
     df = full_df.copy()
 
     if reference_time:
-        ref_ts = pd.to_datetime(str(reference_time))
-        df["StartTime"] = pd.to_datetime(df["StartTime"], errors="coerce")
-        df["EndTime"] = pd.to_datetime(df["EndTime"], errors="coerce")
+        # Convert to tz-naive UTC timestamp for comparison with DataFrame
+        ref_ts = pd.Timestamp(str(reference_time)).tz_localize(None)
+        # Convert columns and strip timezone if present
+        start_col = pd.to_datetime(df["StartTime"], errors="coerce", utc=True)
+        end_col = pd.to_datetime(df["EndTime"], errors="coerce", utc=True)
+        df["StartTime"] = start_col.dt.tz_localize(None) if start_col.dt.tz else start_col
+        df["EndTime"] = end_col.dt.tz_localize(None) if end_col.dt.tz else end_col
         time_mask = (df["StartTime"].isna() | (df["StartTime"] <= ref_ts)) & (
             df["EndTime"].isna() | (ref_ts <= df["EndTime"])
         )
