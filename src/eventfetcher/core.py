@@ -18,6 +18,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 from typing import Optional
 
+import obspy
+import obspy.core.stream as _obspy_stream
+import obspy.clients.filesystem.sds as _obspy_sds
+
 from obspy import Inventory
 from obspy import Stream, read_events, UTCDateTime, Catalog
 from obspy.core.event import Event as ObsPyEvent, Origin
@@ -31,13 +35,33 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.DEBUG)
 
-# libmseed (the C library ObsPy uses to decode miniSEED) keeps
-# process-global state for its own internal logging, with no locking of
-# its own. Two threads decoding miniSEED at the same time can race on
-# that global state and crash the whole process (SIGSEGV/SIGILL) - since
-# it's native code, this can't be caught as a Python exception. Serialize
-# access to the decode path so only one thread is ever inside it.
+# libmseed (the C library ObsPy uses to decode miniSEED, invoked from
+# obspy.read()/Stream reading) keeps process-global state for its own
+# internal logging, with no locking of its own. Two threads decoding
+# miniSEED at the same time can race on that global state and crash the
+# whole process (SIGSEGV/SIGILL) - since it's native code, this can't be
+# caught as a Python exception.
+#
+# The unsafe part is only the parsing/decoding step (obspy.read), NOT the
+# network download that precedes it in get_waveforms_bulk() - locking the
+# whole bulk call would serialize network I/O for no reason and tank
+# throughput under concurrency. So instead we wrap obspy.core.stream.read
+# itself (the single choke point both the FDSN client - via `obspy.read`
+# - and the SDS client - via a name it imported directly - end up
+# calling) and patch every already-imported reference to it, so only the
+# actual decode is serialized.
 _MSEED_DECODE_LOCK = threading.Lock()
+_unlocked_obspy_read = _obspy_stream.read
+
+
+def _locked_obspy_read(*args, **kwargs):
+    with _MSEED_DECODE_LOCK:
+        return _unlocked_obspy_read(*args, **kwargs)
+
+
+_obspy_stream.read = _locked_obspy_read
+obspy.read = _locked_obspy_read
+_obspy_sds.read = _locked_obspy_read
 
 warnings.filterwarnings(
     "ignore",
@@ -956,8 +980,7 @@ class EventFetcher(object):
             for attempt in range(max_retries):
                 try:
                     client = self._create_trace_client()
-                    with _MSEED_DECODE_LOCK:
-                        result = client.get_waveforms_bulk(current_chunk, attach_response=False)
+                    result = client.get_waveforms_bulk(current_chunk, attach_response=False)
                     if result and len(result) > 0:
                         if loc_code != orig_loc:
                             logger.info(
@@ -1197,16 +1220,14 @@ class EventFetcher(object):
         logger.debug(f"{self.event.id}: getting waveforms ...")
         if self.sds:
             # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
-            with _MSEED_DECODE_LOCK:
-                traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+            traces = self.trace_client_sds.get_waveforms_bulk(bulk)
         else:
             if self.fdsn_max_workers > 1:
                 traces = self._parallel_get_waveforms_bulk(bulk)
             else:
-                with _MSEED_DECODE_LOCK:
-                    traces = self.trace_client.get_waveforms_bulk(
-                        bulk, attach_response=False
-                    )
+                traces = self.trace_client.get_waveforms_bulk(
+                    bulk, attach_response=False
+                )
 
         # merge multiple segments if any
         try:
