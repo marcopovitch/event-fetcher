@@ -5,7 +5,6 @@ import _pickle as cPickle
 import logging
 import re
 import sys
-import threading
 import time
 import warnings
 import numpy as np
@@ -17,10 +16,6 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 from typing import Optional
-
-import obspy
-import obspy.core.stream as _obspy_stream
-import obspy.clients.filesystem.sds as _obspy_sds
 
 from obspy import Inventory
 from obspy import Stream, read_events, UTCDateTime, Catalog
@@ -34,34 +29,6 @@ from obspy.geodetics import gps2dist_azimuth
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.DEBUG)
-
-# libmseed (the C library ObsPy uses to decode miniSEED, invoked from
-# obspy.read()/Stream reading) keeps process-global state for its own
-# internal logging, with no locking of its own. Two threads decoding
-# miniSEED at the same time can race on that global state and crash the
-# whole process (SIGSEGV/SIGILL) - since it's native code, this can't be
-# caught as a Python exception.
-#
-# The unsafe part is only the parsing/decoding step (obspy.read), NOT the
-# network download that precedes it in get_waveforms_bulk() - locking the
-# whole bulk call would serialize network I/O for no reason and tank
-# throughput under concurrency. So instead we wrap obspy.core.stream.read
-# itself (the single choke point both the FDSN client - via `obspy.read`
-# - and the SDS client - via a name it imported directly - end up
-# calling) and patch every already-imported reference to it, so only the
-# actual decode is serialized.
-_MSEED_DECODE_LOCK = threading.Lock()
-_unlocked_obspy_read = _obspy_stream.read
-
-
-def _locked_obspy_read(*args, **kwargs):
-    with _MSEED_DECODE_LOCK:
-        return _unlocked_obspy_read(*args, **kwargs)
-
-
-_obspy_stream.read = _locked_obspy_read
-obspy.read = _locked_obspy_read
-_obspy_sds.read = _locked_obspy_read
 
 warnings.filterwarnings(
     "ignore",
