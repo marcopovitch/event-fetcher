@@ -5,6 +5,7 @@ import _pickle as cPickle
 import logging
 import re
 import sys
+import threading
 import time
 import warnings
 import numpy as np
@@ -29,6 +30,14 @@ from obspy.geodetics import gps2dist_azimuth
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger("EventFetcher")
 logger.setLevel(logging.DEBUG)
+
+# libmseed (the C library ObsPy uses to decode miniSEED) keeps
+# process-global state for its own internal logging, with no locking of
+# its own. Two threads decoding miniSEED at the same time can race on
+# that global state and crash the whole process (SIGSEGV/SIGILL) - since
+# it's native code, this can't be caught as a Python exception. Serialize
+# access to the decode path so only one thread is ever inside it.
+_MSEED_DECODE_LOCK = threading.Lock()
 
 warnings.filterwarnings(
     "ignore",
@@ -947,7 +956,8 @@ class EventFetcher(object):
             for attempt in range(max_retries):
                 try:
                     client = self._create_trace_client()
-                    result = client.get_waveforms_bulk(current_chunk, attach_response=False)
+                    with _MSEED_DECODE_LOCK:
+                        result = client.get_waveforms_bulk(current_chunk, attach_response=False)
                     if result and len(result) > 0:
                         if loc_code != orig_loc:
                             logger.info(
@@ -1187,14 +1197,16 @@ class EventFetcher(object):
         logger.debug(f"{self.event.id}: getting waveforms ...")
         if self.sds:
             # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
-            traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+            with _MSEED_DECODE_LOCK:
+                traces = self.trace_client_sds.get_waveforms_bulk(bulk)
         else:
             if self.fdsn_max_workers > 1:
                 traces = self._parallel_get_waveforms_bulk(bulk)
             else:
-                traces = self.trace_client.get_waveforms_bulk(
-                    bulk, attach_response=False
-                )
+                with _MSEED_DECODE_LOCK:
+                    traces = self.trace_client.get_waveforms_bulk(
+                        bulk, attach_response=False
+                    )
 
         # merge multiple segments if any
         try:
