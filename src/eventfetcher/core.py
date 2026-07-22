@@ -1192,8 +1192,26 @@ class EventFetcher(object):
 
         logger.debug(f"{self.event.id}: getting waveforms ...")
         if self.sds:
-            # Use SDS (SeisComP Data Structure) to get traces rather than FDSN dataselect
-            traces = self.trace_client_sds.get_waveforms_bulk(bulk)
+            # Use SDS (SeisComP Data Structure) to get traces rather than
+            # FDSN dataselect. Fetch one bulk entry (= one component) at a
+            # time instead of calling get_waveforms_bulk() directly: a
+            # single corrupt/truncated day file on disk (e.g. a zero-filled
+            # MiniSEED file) raises errors get_waveforms_bulk() doesn't
+            # catch (InternalMSEEDParseTimeError, TypeError from format
+            # sniffing, ...) and aborts the whole event instead of just
+            # dropping that one component.
+            traces = Stream()
+            for entry in bulk:
+                net, sta, loc, chan, t1, t2 = entry
+                try:
+                    traces += self.trace_client_sds.get_waveforms(
+                        net, sta, loc, chan, t1, t2
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[%s] Skipping unreadable SDS data for %s.%s.%s.%s: %s",
+                        self.event.id, net, sta, loc, chan, e,
+                    )
         else:
             if self.fdsn_max_workers > 1:
                 traces = self._parallel_get_waveforms_bulk(bulk)
