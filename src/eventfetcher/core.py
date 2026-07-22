@@ -243,19 +243,12 @@ def filter_out_station_without_3channels(
     )
     tmp_bulk = []
     waveforms_to_remove = []
+    missing_metadata = []
 
     for net, sta, loc, chan, t1, t2 in bulk:
         channels = station_cache.get((net, sta, loc))
         if not channels:
-            logger.error(
-                "[%s] No metadata for %s.%s.%s.%s at %s",
-                txt,
-                net,
-                sta,
-                loc,
-                chan,
-                reference_time,
-            )
+            missing_metadata.append(f"{net}.{sta}.{loc}.{chan}")
             continue
 
         logger.debug(
@@ -284,6 +277,19 @@ def filter_out_station_without_3channels(
     for net, sta, loc in waveforms_to_remove:
         prefix = f"{net}.{sta}.{loc}."
         waveforms_id = [w for w in waveforms_id if not w.startswith(prefix)]
+
+    # One aggregated line instead of one log call per missing station: a
+    # station absent from the inventory for a given event is expected
+    # (incomplete station coverage), not a pipeline malfunction, and
+    # logging it individually floods the log/error counters at scale
+    # (hundreds of thousands of events x dozens of routinely-missing
+    # stations each).
+    if missing_metadata:
+        logger.warning(
+            "[%s] No metadata for %d/%d requested station(s) at %s: %s",
+            txt, len(missing_metadata), len(bulk), reference_time,
+            ", ".join(missing_metadata),
+        )
 
     return waveforms_id, tmp_bulk
 
