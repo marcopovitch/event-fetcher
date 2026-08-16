@@ -6,7 +6,7 @@ inventory-aware filtering, and optionally exports rotated/denoised streams.
 ## Quick start
 
 ```
-./eventfetcher.py -c eventfetcher.yml -e fr2023mlexeo
+eventfetcher -c config/eventfetcher.yml -e fr2023mlexeo
 ```
 
 ```
@@ -78,9 +78,11 @@ station_max_dist_km: 350
 fdsn_max_workers: 5   # number of concurrent workers (>=1)
 ```
 
-The default is `1`, which matches the legacy single-request flow. Increasing the value allows
-faster downloads when the remote FDSN server accepts multiple simultaneous clients. Tune the
-number to match the service limits of your provider.
+The default is `1`. Both the single-worker and parallel paths share the same retry logic
+(exponential backoff, alternative location codes, per-station error isolation), so a single
+unreachable station never aborts the whole fetch regardless of `fdsn_max_workers`. Increasing the
+value allows faster downloads when the remote FDSN server accepts multiple simultaneous clients.
+Tune the number to match the service limits of your provider.
 
 ## CLI overrides
 
@@ -89,6 +91,10 @@ Key command-line switches let you bypass YAML defaults when needed:
 - `-e/--eventid <qml_id>` — fetch a QuakeML event by id (mutually exclusive with virtual options).
 - `--virtual-lat/--virtual-lon/--virtual-time` — synthesize a virtual event using epicenter coordinates and origin time (depth defaults to 0 km).
 - `--station-max-dist` — override `station_max_dist_km` from the configuration file.
+- `--time-length` — override `time_length` (extraction window, in seconds) from the configuration file.
+- `-o/--output <dir>` — override `backup_dirname` from the configuration file; the directory must be empty.
+- `-l/--loglevel` — set the log level (`debug`, `info`, `warning`, `error`).
+- `-d/--denoise` — currently disabled; the CLI exits with an error if passed (denoising is not implemented yet).
 
 When invoking a virtual event, do **not** pass `-e/--eventid`; the CLI enforces that only one mode is selected. Example:
 

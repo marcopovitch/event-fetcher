@@ -11,7 +11,6 @@ import numpy as np
 import argparse
 import yaml
 import urllib.parse
-import urllib.error
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
@@ -41,6 +40,36 @@ warnings.filterwarnings(
     message=r"Found more than one matching channel metadata. Returning first.",
     category=UserWarning,
 )
+
+# Priority for instrument type (2nd character of the channel code):
+# H=High-broadband velocimeter, N=Accelerometer, E=Short-period/other velocimeter
+INSTRUMENT_PRIORITY = {"H": 2, "N": 1, "E": 0}
+
+
+def _resolve_E_N_traces(h_traces, net_sta_loc):
+    """Assign the two horizontal traces to (E, N) for the PhaseNet CSV.
+
+    Resolution order on the channel code's last character:
+    - "E"/"N" suffix: unambiguous, use directly.
+    - "1"/"2" suffix: common convention, 1->N, 2->E.
+    - anything else (e.g. "2"/"3"): orientation can't be inferred from the
+      code alone; warn and fall back to alphabetical order (previous
+      behaviour), so the mis-assignment risk is visible instead of silent.
+    """
+    suffixes = {tr.stats.channel[-1] for tr in h_traces}
+    by_suffix = {tr.stats.channel[-1]: tr for tr in h_traces}
+    if suffixes == {"E", "N"}:
+        return by_suffix["E"], by_suffix["N"]
+    if suffixes == {"1", "2"}:
+        return by_suffix["2"], by_suffix["1"]
+    logger.warning(
+        "Ambiguous horizontal component naming in %s (%s): can't reliably "
+        "tell E from N, falling back to alphabetical order.",
+        net_sta_loc,
+        sorted(suffixes),
+    )
+    ordered = sorted(h_traces, key=lambda tr: tr.stats.channel)
+    return ordered[0], ordered[1]
 
 
 def phasenet_dump(traces, directory):
@@ -84,12 +113,12 @@ def phasenet_dump(traces, directory):
             z_trace = z_traces[0]
             # Get horizontal components
             h_traces = [tr for tr in st if tr.stats.channel[-1] != "Z"]
-            h_traces.sort(key=lambda tr: tr.stats.channel)
             if len(h_traces) < 2:
                 logger.error(f"Not enough components (need 3) in {net_sta_loc}: {st}")
                 continue
+            e_trace, n_trace = _resolve_E_N_traces(h_traces, net_sta_loc)
             fp.write(
-                f"{filename},{h_traces[0].stats.channel},{h_traces[1].stats.channel},{z_trace.stats.channel}\n"
+                f"{filename},{e_trace.stats.channel},{n_trace.stats.channel},{z_trace.stats.channel}\n"
             )
 
 
@@ -116,9 +145,11 @@ def mseed_dump_by_station(traces, directory):
     for g in df.groupby(["net", "sta", "loc"]):
         st = traces.select(network=g[0][0], station=g[0][1], location=g[0][2])
         stats = st[0].stats
+        group_starttime = min(tr.stats.starttime for tr in st)
+        group_endtime = max(tr.stats.endtime for tr in st)
         filename = os.path.join(
             directory,
-            f"{stats.network}.{stats.station}.{stats.location}.{stats.starttime}.{stats.endtime}",
+            f"{stats.network}.{stats.station}.{stats.location}.{group_starttime}.{group_endtime}",
         )
         st.write(filename + ".mseed", format="MSEED")
         if stats.response:
@@ -146,7 +177,7 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
                     "Latitude": station.latitude,
                     "Longitude": station.longitude,
                     "Elevation": station.elevation,
-                    "Depth": channel.depth,
+                    "Depth": channel.depth,  # informational only, not consumed elsewhere in this module
                     # "Azimuth": channel.azimuth,
                     # "Dip": channel.dip,
                     # "SensorDescription": sensor_description,
@@ -165,11 +196,8 @@ def inventory2df(inventory: Inventory) -> pd.DataFrame:
     if df.empty:
         return df
 
-    df["SampleRate"] = df["SampleRate"].apply(np.float32)
-    df = df.fillna("")
-    df["Latitude"] = df["Latitude"].apply(np.float32)
-    df["Longitude"] = df["Longitude"].apply(np.float32)
-    df["Elevation"] = df["Elevation"].apply(np.float32)
+    for col in ("SampleRate", "Latitude", "Longitude", "Elevation"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     df["Location"] = df["Location"].astype(str)
     df["Channel"] = df["Channel"].astype(str)
 
@@ -211,16 +239,50 @@ def _build_station_channel_cache(
     for key, group in grouped:
         max_sample_rate = group["SampleRate"].max()
         filtered = group[group["SampleRate"] == max_sample_rate]
-        # Sort by StartTime then Channel for deterministic ordering
-        filtered = filtered.sort_values(by=["StartTime", "Channel"]).head(3)
+
+        # Pick a complete, orthogonal instrument family (same logic as
+        # remove_traces_without_3channels) instead of the first 3 channels in
+        # alphabetical order, which doesn't guarantee a coherent Z+2-horizontal
+        # triad when several instrument families are present at max rate.
+        families = {}
+        for _, row in filtered.iterrows():
+            chan = row["Channel"]
+            instrument_code = chan[1].upper() if len(chan) > 1 else ""
+            families.setdefault(instrument_code, {})[chan] = chan
+
+        complete_families = []
+        for instrument_code, chan_map in families.items():
+            resolved = _resolve_ZNE_components(chan_map.keys())
+            if resolved is None:
+                continue
+            vertical, horizontals = resolved
+            complete_families.append(
+                (
+                    INSTRUMENT_PRIORITY.get(instrument_code, -1),
+                    [vertical] + horizontals,
+                )
+            )
+
+        if complete_families:
+            complete_families.sort(key=lambda item: item[0], reverse=True)
+            channels = sorted(complete_families[0][1])
+        else:
+            # No complete triad at max rate: keep previous deterministic
+            # fallback so callers still get up to 3 candidate channels.
+            channels = (
+                filtered.sort_values(by=["StartTime", "Channel"])
+                .head(3)["Channel"]
+                .tolist()
+            )
+
         logger.debug(
             "Metadata cache %s: %d channel(s) kept (max rate=%s) at %s",
             ".".join(key),
-            len(filtered),
+            len(channels),
             max_sample_rate,
             reference_time,
         )
-        station_cache[key] = filtered["Channel"].tolist()
+        station_cache[key] = channels
     return station_cache
 
 
@@ -321,6 +383,8 @@ def filter_out_station_by_distance(
                 ]
                 or "empty",
             )
+            waveform_id = ".".join((net, sta, loc or "", chan))
+            waveforms_id = cleanup_waveforms_id(waveforms_id, waveform_id)
             continue
         resolved_loc = coord.get("location_code", loc) or loc or ""
         w = ".".join((net, sta, resolved_loc, tmpchan))
@@ -389,24 +453,41 @@ def _find_channel_coordinates(inventory, net, sta, loc, channel, time):
 
 
 def _is_pattern_blacklisting_waveform(pattern, waveform_id):
-    """Return True if waveform_id matches pattern using regex or shell wildcards."""
+    """Return True if waveform_id matches pattern.
+
+    Patterns are treated as shell-style glob first (the convention used in
+    config files, e.g. "XX.GP*", "1K.EO*"), with regex as a fallback for
+    patterns that aren't valid/matching globs. Glob is tried first because a
+    pattern meant as a glob can also be a syntactically valid but
+    semantically different regex (e.g. "RT*HZ").
+    """
     if not pattern:
         return False
+    if fnmatch.fnmatch(waveform_id, pattern):
+        return True
     try:
-        if re.match(pattern, waveform_id):
-            return True
+        return bool(re.match(pattern, waveform_id))
     except re.error:
         logger.debug("Invalid regex pattern '%s' ignored.", pattern)
-    return fnmatch.fnmatch(waveform_id, pattern)
+        return False
 
 
 def _build_channel_rate_map(df_inventory):
-    """Return exact and station-level sample rate maps from inventory dataframe."""
+    """Return exact, station-level, and instrument-prefix sample rate maps
+    from an inventory dataframe.
+
+    The "prefix" maps are keyed on the first 2 characters of the channel code
+    (band + instrument type, e.g. "HH") rather than the full code, because
+    callers may only know a wildcarded channel like "HH?" (see
+    EventFetcher._hack_streams) and not the exact orientation suffix.
+    """
     if df_inventory.empty:
-        return {"exact": {}, "station": {}}
+        return {"exact": {}, "station": {}, "prefix": {}, "station_prefix": {}}
 
     channel_rates_exact = {}
     channel_rates_station = {}
+    channel_rates_prefix = {}
+    channel_rates_station_prefix = {}
     for row in df_inventory.itertuples(index=False):
         key_exact = (row.Network, row.Station, row.Location, row.Channel)
         channel_rates_exact[key_exact] = row.SampleRate
@@ -417,11 +498,29 @@ def _build_channel_rate_map(df_inventory):
         if current is None or (rate_value is not None and rate_value > current):
             channel_rates_station[key_station] = rate_value
 
-    return {"exact": channel_rates_exact, "station": channel_rates_station}
+        prefix = row.Channel[:2] if row.Channel else ""
+        key_prefix = (row.Network, row.Station, row.Location, prefix)
+        current = channel_rates_prefix.get(key_prefix)
+        if current is None or (rate_value is not None and rate_value > current):
+            channel_rates_prefix[key_prefix] = rate_value
+
+        key_station_prefix = (row.Network, row.Station, prefix)
+        current = channel_rates_station_prefix.get(key_station_prefix)
+        if current is None or (rate_value is not None and rate_value > current):
+            channel_rates_station_prefix[key_station_prefix] = rate_value
+
+    return {
+        "exact": channel_rates_exact,
+        "station": channel_rates_station,
+        "prefix": channel_rates_prefix,
+        "station_prefix": channel_rates_station_prefix,
+    }
 
 
 def remove_flat_traces(waveforms_id, traces, txt):
-    # variance is used to detect flat signal
+    # variance is used to detect flat signal; threshold is an absolute value
+    # tuned for raw counts (no instrument response removed) — revisit if the
+    # pipeline starts feeding physical-unit (e.g. m/s) traces here.
     tolerance = 1e-5
     traces_to_remove = []
     for trace in traces:
@@ -442,6 +541,21 @@ def remove_flat_traces(waveforms_id, traces, txt):
     return waveforms_id
 
 
+def _resolve_ZNE_components(channels):
+    """Given channel codes sharing the same 2-char instrument prefix, return
+    (vertical, [horizontal1, horizontal2]) if exactly one code ends in "Z" and
+    the two others are distinct non-"Z" codes (orientation suffix is not
+    assumed to be N/E or 1/2 — SEED also allows pairs like 2/3). Returns None
+    if the set isn't a complete, unambiguous triad.
+    """
+    channels = list(dict.fromkeys(channels))  # de-dup, keep order
+    vertical = [c for c in channels if c[-1] == "Z"]
+    horizontal = [c for c in channels if c[-1] != "Z"]
+    if len(vertical) != 1 or len(horizontal) != 2:
+        return None
+    return vertical[0], horizontal
+
+
 def remove_traces_without_3channels(waveforms_id, traces, txt):
     station_groups = {}
     for trace in traces:
@@ -449,13 +563,39 @@ def remove_traces_without_3channels(waveforms_id, traces, txt):
         key = f"{stats.network}.{stats.station}.{stats.location}"
         station_groups.setdefault(key, []).append(trace)
 
-    traces_to_remove = []
+    traces_to_keep = []
     for key, grouped_traces in station_groups.items():
-        if len(grouped_traces) != 3:
-            traces_to_remove.extend(grouped_traces)
+        # Sub-group by instrument family (2nd char of channel code), so a
+        # station carrying both velocimetric (HH*) and accelerometric (HN*)
+        # triads isn't rejected outright just because it has >3 traces.
+        families = {}
+        for tr in grouped_traces:
+            chan = tr.stats.channel
+            instrument_code = chan[1] if len(chan) > 1 else ""
+            families.setdefault(instrument_code.upper(), {})[chan] = tr
 
-    # Remove traces without 3 channels using list comprehension
-    traces[:] = [tr for tr in traces if tr not in traces_to_remove]
+        complete_families = []
+        for instrument_code, chan_to_trace in families.items():
+            resolved = _resolve_ZNE_components(chan_to_trace.keys())
+            if resolved is None:
+                continue
+            vertical, horizontals = resolved
+            complete_families.append(
+                (
+                    INSTRUMENT_PRIORITY.get(instrument_code, -1),
+                    [chan_to_trace[vertical]] + [chan_to_trace[c] for c in horizontals],
+                )
+            )
+
+        if complete_families:
+            complete_families.sort(key=lambda item: item[0], reverse=True)
+            traces_to_keep.extend(complete_families[0][1])
+
+    traces_to_keep_ids = {id(tr) for tr in traces_to_keep}
+    traces_to_remove = [tr for tr in traces if id(tr) not in traces_to_keep_ids]
+
+    # Remove traces without a complete 3-channel instrument family
+    traces[:] = [tr for tr in traces if id(tr) in traces_to_keep_ids]
     for tr in traces_to_remove:
         net_sta_loc = ".".join(tr.id.split(".")[:3])
         logger.warning(
@@ -588,6 +728,9 @@ class EventFetcher(object):
             except OSError as e:
                 logger.error("Can't create cache directory '%s' (%s) !", cache_dir, e)
                 self.event = EventInfo()
+                self.cache_dir = None
+                self.backup_event_file = None
+                self.backup_traces_file = None
                 return
 
         self.cache_dir = cache_dir
@@ -667,7 +810,7 @@ class EventFetcher(object):
 
         if self.virtual_event:
             self.event.qml = self._build_virtual_event()
-            if self.event.qml:
+            if self.event.qml and self.backup_event_file:
                 catalog = Catalog(events=[self.event.qml])
                 try:
                     catalog.write(self.backup_event_file, format="QUAKEML")
@@ -682,7 +825,7 @@ class EventFetcher(object):
                         exc,
                     )
         else:
-            if self.enable_read_cache:
+            if self.enable_read_cache and self.backup_event_file:
                 if os.path.isfile(self.backup_event_file):
                     logger.debug(
                         "Fetching event %s from file %s.",
@@ -749,7 +892,7 @@ class EventFetcher(object):
         self._set_extraction_time_window()
 
         fetch_from_cache_success = None
-        if self.enable_read_cache:
+        if self.enable_read_cache and self.backup_traces_file:
             if os.path.isfile(self.backup_traces_file):
                 logger.debug(
                     "Fetching traces from cached file %s.", self.backup_traces_file
@@ -778,10 +921,7 @@ class EventFetcher(object):
                 self.trace_client_sds = ClientSDS(self.sds)
 
             logger.debug("Fetching traces (%s) from FDSN-WS or SDS", self.event.id)
-            try:
-                self.st = self.get_trace_bulk(self.starttime, self.endtime)
-            except urllib.error.HTTPError as e:
-                raise e
+            self.st = self.get_trace_bulk(self.starttime, self.endtime)
 
         if self.enable_denoising:
             # denoise_model can be 'dae', 'original' or 'urban'.
@@ -813,7 +953,15 @@ class EventFetcher(object):
         logger.debug(self.event)
 
     def _build_virtual_event(self):
-        """Create an ObsPy Event from CLI-provided virtual event metadata."""
+        """Create an ObsPy Event from CLI-provided virtual event metadata.
+
+        Raises ValueError if the time reference is missing, uncaught here:
+        the CLI enforces --virtual-time as a required argument alongside the
+        other --virtual-* flags, so this is defended at the public CLI
+        surface. Callers using EventFetcher as a library without going
+        through the CLI must supply a time reference themselves or handle
+        this ValueError.
+        """
         if not self.virtual_event:
             return None
 
@@ -942,6 +1090,7 @@ class EventFetcher(object):
         # Get location codes to try from inventory
         loc_codes_to_try = self._get_alternative_location_codes(net, sta, orig_loc)
 
+        client = self._create_trace_client()
         last_exc = None
         for loc_code in loc_codes_to_try:
             # Build chunk with current location code
@@ -952,7 +1101,6 @@ class EventFetcher(object):
 
             for attempt in range(max_retries):
                 try:
-                    client = self._create_trace_client()
                     result = client.get_waveforms_bulk(current_chunk, attach_response=False)
                     if result and len(result) > 0:
                         if loc_code != orig_loc:
@@ -1000,6 +1148,34 @@ class EventFetcher(object):
     def _fetch_bulk_chunk(self, chunk):
         """Fetch a subset of bulk entries with retry logic."""
         return self._fetch_with_retry(chunk)
+
+    def _sequential_get_waveforms_bulk(self, bulk):
+        """Same retry/per-chunk error handling as _parallel_get_waveforms_bulk,
+        without a thread pool. Used when fdsn_max_workers == 1 so the series
+        path doesn't skip retries and alternative location codes.
+        """
+        grouped = self._group_bulk_by_station(bulk)
+        if not grouped:
+            return Stream()
+
+        traces = Stream()
+        for chunk in grouped:
+            try:
+                stream = self._fetch_bulk_chunk(chunk)
+            except Exception as exc:
+                net, sta, loc = chunk[0][:3]
+                logger.warning(
+                    "%s: FDSN bulk chunk failed for %s.%s.%s (%s)",
+                    self.event.id,
+                    net,
+                    sta,
+                    loc,
+                    exc,
+                )
+                continue
+            if stream:
+                traces += stream
+        return traces
 
     def _parallel_get_waveforms_bulk(self, bulk):
         grouped = self._group_bulk_by_station(bulk)
@@ -1073,9 +1249,6 @@ class EventFetcher(object):
         if not channel_rates["exact"] and not channel_rates["station"]:
             return
 
-        # Priority for instrument type (2nd character): H=High-broadband, N=Accelerometer, E=Other/Unknown
-        instrument_priority = {"H": 2, "N": 1, "E": 0}
-        
         # Priority for band/sample rate code (1st character):
         # D: very high, H: high, E: extended, B: broadband, S: short period
         sample_rate_priority = {"D": 4, "H": 3, "E": 2, "B": 2, "S": 1}
@@ -1083,14 +1256,23 @@ class EventFetcher(object):
         for idx, wid in enumerate(self.waveforms_id):
             net, sta, loc, chan = wid.split(".")
             component = chan[-1] if chan else ""
-            sample_rate = channel_rates["exact"].get((net, sta, loc, chan))
-            if sample_rate is None:
-                sample_rate = channel_rates["station"].get((net, sta, chan))
+            if "?" in chan or "*" in chan:
+                # Wildcarded channel (e.g. "HH?" from _hack_streams): the exact
+                # orientation suffix is unknown, so match on the 2-char
+                # band/instrument prefix instead of the full code.
+                prefix = chan[:2]
+                sample_rate = channel_rates["prefix"].get((net, sta, loc, prefix))
+                if sample_rate is None:
+                    sample_rate = channel_rates["station_prefix"].get((net, sta, prefix))
+            else:
+                sample_rate = channel_rates["exact"].get((net, sta, loc, chan))
+                if sample_rate is None:
+                    sample_rate = channel_rates["station"].get((net, sta, chan))
             rate_cmp = sample_rate if sample_rate is not None else -1
             
             # Extract instrument type from 2nd character (H in HHZ/EHZ, N in HNZ/ENZ, etc.)
             instrument_code = chan[1] if len(chan) > 1 else "E"
-            instrument_prio = instrument_priority.get(instrument_code.upper(), -1)
+            instrument_prio = INSTRUMENT_PRIORITY.get(instrument_code.upper(), -1)
             
             # Extract sample rate type from 1st character
             sample_rate_code = chan[0] if len(chan) > 0 else "E"
@@ -1152,6 +1334,9 @@ class EventFetcher(object):
             return Stream()
 
         inventory_df = inventory2df(inventory)
+        if inventory_df.empty:
+            logger.warning("%s: Empty inventory, no traces to fetch.", self.event.id)
+            return Stream()
         inventory_df["SampleRate"] = pd.to_numeric(
             inventory_df["SampleRate"], errors="coerce"
         )
@@ -1216,9 +1401,7 @@ class EventFetcher(object):
             if self.fdsn_max_workers > 1:
                 traces = self._parallel_get_waveforms_bulk(bulk)
             else:
-                traces = self.trace_client.get_waveforms_bulk(
-                    bulk, attach_response=False
-                )
+                traces = self._sequential_get_waveforms_bulk(bulk)
 
         # merge multiple segments if any
         try:
@@ -1270,6 +1453,10 @@ class EventFetcher(object):
     def rotate_to_RT(self):
         # make a copy and rotate traces
         # return only R and T traces
+        # Uses the response attached to the group's first trace for the whole
+        # group's rotation — assumes a homogeneous inventory per station
+        # (all components share the same response). Not valid if a station's
+        # traces span chunked/differing responses.
         if not self.st:
             return Stream()
 
@@ -1319,6 +1506,11 @@ class EventFetcher(object):
         return st_RT
 
     def get_event(self):
+        # QuakeML caching (write) is gated on enable_write_cache: with the
+        # cache disabled, _get_data still creates output_dirname/backup_dirname
+        # but no QML file is persisted. Cache is opt-in for both read and
+        # write; callers relying on the cache directory being populated must
+        # enable it explicitly.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=UserWarning)
 
@@ -1367,7 +1559,9 @@ class EventFetcher(object):
         pick_index = {p.resource_id: p for p in e.picks}
 
         for a in o.arrivals:
-            if a.time_weight == 0.0 and self.use_only_trace_with_weighted_arrival:
+            if (
+                a.time_weight is None or a.time_weight <= 0.0
+            ) and self.use_only_trace_with_weighted_arrival:
                 continue
             p = pick_index.get(a.pick_id)
             if p:
@@ -1792,8 +1986,8 @@ def main():
         conf["output"]["backup_dirname"] = args.output_dirname
 
     if args.denoise:
-        conf["enable_denoising"] = True
-        raise NotImplementedError("Denoising is deactivated for now.")
+        logger.error("Denoising is deactivated for now.")
+        sys.exit(255)
     else:
         conf["enable_denoising"] = False
 
