@@ -1731,6 +1731,13 @@ def main():
         default=None,
         help="Override station_max_dist_km from configuration (km).",
     )
+    parser.add_argument(
+        "--time-length",
+        dest="cli_time_length",
+        type=float,
+        default=None,
+        help="Override time_length from configuration (seconds).",
+    )
     args = parser.parse_args()
 
     if not args.conf_file:
@@ -1792,6 +1799,9 @@ def main():
 
     if args.cli_station_max_dist is not None:
         conf["station_max_dist_km"] = args.cli_station_max_dist
+
+    if args.cli_time_length is not None:
+        conf["time_length"] = args.cli_time_length
 
     retcode = _get_data(
         conf,
