@@ -674,6 +674,7 @@ class EventFetcher(object):
         fdsn_max_workers=1,
         virtual_event=None,
         fdsn_timeout=300,
+        inventory_level="response",
     ):
         logger.setLevel(log_level)
         self.st = None
@@ -693,6 +694,13 @@ class EventFetcher(object):
         self.write_cache_format = write_cache_format
         self.fdsn_max_workers = max(1, int(fdsn_max_workers or 1))
         self.fdsn_timeout = fdsn_timeout
+        # obspy get_stations_bulk() level: "response" fetches full
+        # instrument response (poles/zeros/coefficients) and is much
+        # heavier than "channel" (metadata only - coordinates, sample
+        # rate, orientation). Only needed if a caller actually removes
+        # instrument response downstream; get_coordinates() and
+        # Stream.rotate() work fine with "channel".
+        self.inventory_level = inventory_level
         if virtual_event and not isinstance(virtual_event, SimpleNamespace):
             self.virtual_event = SimpleNamespace(
                 latitude=virtual_event.get("latitude"),
@@ -1238,7 +1246,9 @@ class EventFetcher(object):
                     
             else:
                 bulk = self._build_bulk_entries(waveforms, starttime, endtime)
-                inventory = self.trace_client.get_stations_bulk(bulk, level="response")
+                inventory = self.trace_client.get_stations_bulk(
+                    bulk, level=self.inventory_level
+                )
             return inventory
         except Exception as e:
             logger.error(f"{self.event.id}: {type(e).__name__} - {str(e)}")
@@ -1770,6 +1780,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_e
         log_level=numeric_level,
         fdsn_max_workers=conf.get("fdsn_max_workers", 1),
         virtual_event=virtual_event,
+        inventory_level=conf.get("inventory_level", "response"),
     )
 
     if not mydata.st:
