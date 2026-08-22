@@ -124,6 +124,8 @@ Key command-line switches let you bypass YAML defaults when needed:
 - `--virtual-lat/--virtual-lon/--virtual-time` — synthesize a virtual event using epicenter coordinates and origin time (depth defaults to 0 km).
 - `--station-max-dist` — override `station_max_dist_km` from the configuration file.
 - `--time-length` — override `time_length` (extraction window, in seconds) from the configuration file.
+- `--sds <dir>` — override `sds` from the configuration file (path to a local SDS archive).
+- `--inventory-file <path>` — override `inventory_file` from the configuration file (path to a local StationXML file).
 - `-o/--output <dir>` — override `backup_dirname` from the configuration file; the directory must be empty.
 - `-l/--loglevel` — set the log level (`debug`, `info`, `warning`, `error`).
 - `-d/--denoise` — currently disabled; the CLI exits with an error if passed (denoising is not implemented yet).

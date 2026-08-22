@@ -1959,6 +1959,20 @@ def main():
         default=None,
         help="Override time_length from configuration (seconds).",
     )
+    parser.add_argument(
+        "--sds",
+        dest="cli_sds",
+        type=str,
+        default=None,
+        help="Override sds from configuration (path to a local SDS archive).",
+    )
+    parser.add_argument(
+        "--inventory-file",
+        dest="cli_inventory_file",
+        type=str,
+        default=None,
+        help="Override inventory_file from configuration (path to a local StationXML file).",
+    )
     args = parser.parse_args()
 
     if not args.conf_file:
@@ -2023,6 +2037,12 @@ def main():
 
     if args.cli_time_length is not None:
         conf["time_length"] = args.cli_time_length
+
+    if args.cli_sds is not None:
+        conf["sds"] = args.cli_sds
+
+    if args.cli_inventory_file is not None:
+        conf["inventory_file"] = args.cli_inventory_file
 
     retcode = _get_data(
         conf,
