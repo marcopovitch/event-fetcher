@@ -106,16 +106,37 @@ def phasenet_dump(traces, directory):
         fp.write("fname,E,N,Z\n")
         for net_sta_loc, st in wfid_streams.items():
             filename = f"{net_sta_loc}.mseed"
-            z_traces = st.select(component="Z")
-            if not z_traces:
-                logger.error(f"No Z component found in {net_sta_loc}")
+
+            # Group traces by instrument family (2nd char of channel code) so
+            # a station carrying both e.g. HH* and HN* triads simultaneously
+            # doesn't get its Z/E/N picked from mixed families (same pattern
+            # as remove_traces_without_3channels).
+            families = {}
+            for tr in st:
+                chan = tr.stats.channel
+                instrument_code = chan[1] if len(chan) > 1 else ""
+                families.setdefault(instrument_code.upper(), {})[chan] = tr
+
+            complete_families = []
+            for instrument_code, chan_to_trace in families.items():
+                resolved = _resolve_ZNE_components(chan_to_trace.keys())
+                if resolved is None:
+                    continue
+                complete_families.append(
+                    (INSTRUMENT_PRIORITY.get(instrument_code, -1), resolved, chan_to_trace)
+                )
+
+            if not complete_families:
+                logger.error(
+                    f"No complete 3-channel instrument family found in {net_sta_loc}: {st}"
+                )
                 continue
-            z_trace = z_traces[0]
-            # Get horizontal components
-            h_traces = [tr for tr in st if tr.stats.channel[-1] != "Z"]
-            if len(h_traces) < 2:
-                logger.error(f"Not enough components (need 3) in {net_sta_loc}: {st}")
-                continue
+
+            complete_families.sort(key=lambda item: item[0], reverse=True)
+            _, (vertical, horizontals), chan_to_trace = complete_families[0]
+            z_trace = chan_to_trace[vertical]
+            h_traces = [chan_to_trace[c] for c in horizontals]
+
             e_trace, n_trace = _resolve_E_N_traces(h_traces, net_sta_loc)
             fp.write(
                 f"{filename},{e_trace.stats.channel},{n_trace.stats.channel},{z_trace.stats.channel}\n"
@@ -1117,6 +1138,14 @@ class EventFetcher(object):
                                 self.event.id, net, sta, loc_code, orig_loc
                             )
                         return result
+                    # Successful call, empty Stream: no data for this location
+                    # code, don't waste retries — same handling as FDSNNoDataException.
+                    last_exc = f"empty Stream for location '{loc_code}' (no exception raised)"
+                    logger.debug(
+                        "%s: Empty result for %s.%s.%s, trying alternative location codes",
+                        self.event.id, net, sta, loc_code
+                    )
+                    break  # Try next location code
                 except FDSNNoDataException:
                     # No data for this location code, try next one immediately
                     logger.debug(
@@ -1279,7 +1308,14 @@ class EventFetcher(object):
                 if sample_rate is None:
                     sample_rate = channel_rates["station"].get((net, sta, chan))
             rate_cmp = sample_rate if sample_rate is not None else -1
-            
+
+            if len(chan) < 2:
+                logger.warning(
+                    "%s: malformed channel code '%s' for waveform id '%s' (expected >=2 chars); "
+                    "falling back to default instrument/sample-rate priority.",
+                    self.event.id, chan, wid,
+                )
+
             # Extract instrument type from 2nd character (H in HHZ/EHZ, N in HNZ/ENZ, etc.)
             instrument_code = chan[1] if len(chan) > 1 else "E"
             instrument_prio = INSTRUMENT_PRIORITY.get(instrument_code.upper(), -1)
@@ -1788,7 +1824,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_e
         ],
         keep_only_3channels_station=conf["keep_only_3channels_station"],
         enable_RTrotation=conf["enable_RTrotation"],
-        enable_denoising=conf["enable_denoising"],
+        enable_denoising=conf.get("enable_denoising", False),
         backup_dirname=output_dirname,
         enable_write_cache=conf["output"]["enable_write_cache"],
         enable_read_cache=conf["output"]["enable_read_cache"],
@@ -1973,6 +2009,14 @@ def main():
         default=None,
         help="Override inventory_file from configuration (path to a local StationXML file).",
     )
+    parser.add_argument(
+        "--inventory-level",
+        dest="cli_inventory_level",
+        type=str,
+        default=None,
+        choices=["response", "channel"],
+        help="Override inventory_level from configuration ('response' or 'channel').",
+    )
     args = parser.parse_args()
 
     if not args.conf_file:
@@ -2024,7 +2068,7 @@ def main():
                 )
                 sys.exit(255)
 
-        conf["output"]["backup_dirname"] = args.output_dirname
+        conf.setdefault("output", {})["backup_dirname"] = args.output_dirname
 
     if args.denoise:
         logger.error("Denoising is deactivated for now.")
@@ -2043,6 +2087,9 @@ def main():
 
     if args.cli_inventory_file is not None:
         conf["inventory_file"] = args.cli_inventory_file
+
+    if args.cli_inventory_level is not None:
+        conf["inventory_level"] = args.cli_inventory_level
 
     retcode = _get_data(
         conf,

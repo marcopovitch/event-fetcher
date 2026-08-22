@@ -7,7 +7,7 @@ authors = [
 ]
 dependencies = [
     "icecream>=2.1.5",
-    "obspy >= 1.4.0",
+    "obspy @ git+https://github.com/marcopovitch/obspy-libmseed-threadsafe@3dc5d4942",
     "pandas>=2.3.1",
     "pyyaml",
     "seisbench>=0.9.1",

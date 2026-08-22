@@ -29,6 +29,10 @@ keep_only_3channels_station: True
 # to compute ang get Z,R,T channels
 enable_RTrotation: False
 
+# denoising is currently disabled by the CLI (-d/--denoise exits with an
+# error); reserved for future use.
+enable_denoising: False
+
 # hack: to export data in mseed data format
 # or phasenet files (mseed + needed files)
 # enable write cache with write_cache_format as "mseed" or "phasenet""
@@ -76,3 +80,9 @@ sds: null
 # fallback to fdsnws-station)
 #inventory_file: "/path/to/inventory.xml"
 inventory_file: null
+
+# level of detail to fetch for the station inventory: "response" (default,
+# needed for instrument response removal / RT rotation) or "channel"
+# (lighter, useful when many EventFetcher instances run concurrently
+# against the same server). Ignored when inventory_file is set.
+inventory_level: response
