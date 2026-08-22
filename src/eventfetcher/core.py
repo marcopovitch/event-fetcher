@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from types import SimpleNamespace
 from typing import Optional
 
-from obspy import Inventory
+from obspy import Inventory, read_inventory
 from obspy import Stream, read_events, UTCDateTime, Catalog
 from obspy.core.event import Event as ObsPyEvent, Origin
 from obspy.clients.fdsn import Client
@@ -1749,6 +1749,21 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_e
 
     output_dirname = os.path.join(conf["output"]["backup_dirname"], event_id)
 
+    inventory_file = conf["inventory_file"]
+    inventory = None
+    if inventory_file:
+        logger.info("Loading station inventory from local file '%s'", inventory_file)
+        try:
+            inventory = read_inventory(inventory_file)
+        except Exception as e:
+            logger.error(
+                "Could not read inventory file '%s': %s - %s. Exiting !",
+                inventory_file,
+                type(e).__name__,
+                e,
+            )
+            sys.exit(255)
+
     mydata = EventFetcher(
         urllib.parse.unquote(event_id),
         starttime=conf["starttime"],
@@ -1761,6 +1776,7 @@ def _get_data(conf, event_id=None, fdsn_profile=None, loglevel="INFO", virtual_e
         waveforms_id=conf["waveforms_id"],
         #
         sds=conf["sds"],
+        inventory=inventory,
         base_url=ws_base_url,
         ws_event_url=ws_event_url,
         ws_station_url=ws_station_url,

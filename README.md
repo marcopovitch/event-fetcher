@@ -84,6 +84,38 @@ unreachable station never aborts the whole fetch regardless of `fdsn_max_workers
 value allows faster downloads when the remote FDSN server accepts multiple simultaneous clients.
 Tune the number to match the service limits of your provider.
 
+## Station inventory fetch level
+
+```yaml
+inventory_level: response   # "response" (default) or "channel"
+```
+
+`get_stations_bulk()` can request full instrument response (poles/zeros/coefficients) or just
+channel metadata (coordinates, sample rate, orientation). Response data is only needed if a
+caller removes instrument response downstream; `get_coordinates()` and `Stream.rotate()` work
+fine with `channel`. Set `inventory_level: channel` to reduce load on the FDSN station
+webservice, especially useful when many EventFetcher instances run concurrently against the
+same server. Ignored when `inventory_file` is set (see below).
+
+## Loading station inventory from a local file
+
+```yaml
+inventory_file: null   # path to a local StationXML file, or null (default)
+```
+
+When `inventory_file` is set, EventFetcher loads station metadata from the given StationXML
+file via ObsPy's `read_inventory()` instead of querying `ws_station_url`. This is useful when
+the FDSN station webservice is unavailable, slow, or when you want reproducible offline runs
+against a fixed metadata snapshot.
+
+If the file is missing or cannot be parsed, EventFetcher logs an error and exits immediately —
+there is no fallback to fdsnws-station. This mirrors the `sds` override: once a local source
+is configured, the corresponding FDSN service is never contacted.
+
+Note: `inventory_level` (see above) has no effect when `inventory_file` is set, since no
+`get_stations_bulk()` call is made — the full content of the StationXML file (including
+instrument response, if present) is used as-is.
+
 ## CLI overrides
 
 Key command-line switches let you bypass YAML defaults when needed:

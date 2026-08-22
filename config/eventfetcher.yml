@@ -74,3 +74,9 @@ fdsnws:
 # if defined take precedence to ws_dataselect_url
 #sds: "/miniseed"
 sds: null
+
+# if defined, load station inventory from this local StationXML file instead
+# of querying ws_station_url; missing/unreadable file is a fatal error (no
+# fallback to fdsnws-station)
+#inventory_file: "/path/to/inventory.xml"
+inventory_file: null
