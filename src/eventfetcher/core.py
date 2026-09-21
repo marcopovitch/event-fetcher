@@ -241,9 +241,19 @@ def _build_station_channel_cache(
     if reference_time:
         # Convert to tz-naive UTC timestamp for comparison with DataFrame
         ref_ts = pd.Timestamp(str(reference_time)).tz_localize(None)
-        # Convert columns and strip timezone if present
-        start_col = pd.to_datetime(df["StartTime"], errors="coerce", utc=True)
-        end_col = pd.to_datetime(df["EndTime"], errors="coerce", utc=True)
+        # Convert columns and strip timezone if present. format="ISO8601"
+        # (not the default None): StartTime/EndTime were stringified from
+        # UTCDateTime objects up in build_inventory_dataframe() (df =
+        # pd.DataFrame(channels_info, dtype=str)) - a station still open
+        # (no end_date) stringifies to the literal "None" rather than a
+        # timestamp, which breaks pandas' single-format auto-detection
+        # for the whole column and makes it fall back to parsing row by
+        # row via dateutil (a UserWarning, and measurably slower on a
+        # large inventory). ISO8601 parses every real timestamp in one
+        # vectorized pass regardless, leaving "None" to still correctly
+        # become NaT via errors="coerce".
+        start_col = pd.to_datetime(df["StartTime"], errors="coerce", utc=True, format="ISO8601")
+        end_col = pd.to_datetime(df["EndTime"], errors="coerce", utc=True, format="ISO8601")
         df["StartTime"] = start_col.dt.tz_localize(None) if start_col.dt.tz else start_col
         df["EndTime"] = end_col.dt.tz_localize(None) if end_col.dt.tz else end_col
         time_mask = (df["StartTime"].isna() | (df["StartTime"] <= ref_ts)) & (
