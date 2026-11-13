@@ -1119,10 +1119,37 @@ class EventFetcher(object):
             )
         return loc_codes
 
+    @staticmethod
+    def _coverage(stream, chunk):
+        """How well ``stream`` covers the time window of ``chunk``: ``(n_channels, common_seconds, complete)``.
+
+        ``common_seconds`` is the span every channel covers (what survives ``_trim_common_channels``), clipped to
+        the window. ``complete``: three channels for a wildcard request (``HH?``) or every channel asked
+        otherwise, whose common span is (nearly) the whole window.
+        """
+        t0 = min(entry[4] for entry in chunk)
+        t1 = max(entry[5] for entry in chunk)
+        spans = {}
+        for tr in stream:
+            s, e = max(tr.stats.starttime, t0), min(tr.stats.endtime, t1)
+            if e <= s:
+                continue
+            lo, hi = spans.get(tr.stats.channel, (s, e))
+            spans[tr.stats.channel] = (min(lo, s), max(hi, e))
+        if not spans:
+            return 0, 0.0, False
+        common = max(0.0, min(e for _, e in spans.values()) - max(s for s, _ in spans.values()))
+        wanted = sum(3 if ("?" in entry[3] or "*" in entry[3]) else 1 for entry in chunk)
+        tol = max(1.0, 0.02 * (t1 - t0))                # a sample or a short delay at the edges is fine
+        return len(spans), common, len(spans) >= wanted and common >= (t1 - t0) - tol
+
     def _fetch_with_retry(self, chunk, max_retries=3, base_delay=1.0):
         """Fetch bulk chunk with exponential backoff retry.
 
-        Also tries alternative location codes from inventory if the original fails with 204.
+        Also tries alternative location codes from inventory if the original fails with 204, or returns data
+        that does not cover the window on every component (one component starting late, say: the common-channel
+        trim would then cut the others too, picked ones included). Among partial answers the location covering
+        the most is kept.
         """
         net, sta, orig_loc = chunk[0][:3]
 
@@ -1131,6 +1158,7 @@ class EventFetcher(object):
 
         client = self._create_trace_client()
         last_exc = None
+        best = None                                     # (n_channels, common_seconds, loc_code, stream)
         for loc_code in loc_codes_to_try:
             # Build chunk with current location code
             current_chunk = [
@@ -1142,12 +1170,22 @@ class EventFetcher(object):
                 try:
                     result = client.get_waveforms_bulk(current_chunk, attach_response=False)
                     if result and len(result) > 0:
-                        if loc_code != orig_loc:
-                            logger.info(
-                                "%s: Found data for %s.%s using location '%s' instead of '%s'",
-                                self.event.id, net, sta, loc_code, orig_loc
-                            )
-                        return result
+                        n_chan, common, complete = self._coverage(result, current_chunk)
+                        if complete:
+                            if loc_code != orig_loc:
+                                logger.info(
+                                    "%s: Found data for %s.%s using location '%s' instead of '%s'",
+                                    self.event.id, net, sta, loc_code, orig_loc
+                                )
+                            return result
+                        logger.info(
+                            "%s: %s.%s.%s covers the window partially (%d channel(s), %.1f s in common), "
+                            "trying alternative location codes",
+                            self.event.id, net, sta, loc_code, n_chan, common
+                        )
+                        if best is None or (n_chan, common) > best[:2]:
+                            best = (n_chan, common, loc_code, result)
+                        break  # Try next location code
                     # Successful call, empty Stream: no data for this location
                     # code, don't waste retries — same handling as FDSNNoDataException.
                     last_exc = f"empty Stream for location '{loc_code}' (no exception raised)"
@@ -1181,8 +1219,18 @@ class EventFetcher(object):
                         )
                         time.sleep(delay)
 
-        # All retries and location codes failed
-        logger.error(
+        if best is not None:
+            # no location covers the whole window: keep the one covering the most
+            if best[2] != orig_loc:
+                logger.info(
+                    "%s: Using location '%s' instead of '%s' for %s.%s (best partial coverage)",
+                    self.event.id, best[2], orig_loc, net, sta
+                )
+            return best[3]
+
+        # All retries and location codes failed (another instrument family may still serve the station:
+        # _fetch_family_fallbacks, hence a warning)
+        logger.warning(
             "%s: FDSN bulk failed for %s.%s (tried locations: %s) after retries: %s",
             self.event.id,
             net,
@@ -1191,6 +1239,80 @@ class EventFetcher(object):
             last_exc,
         )
         return None
+
+    def _get_bulk(self, bulk):
+        """The traces of ``bulk`` entries, from the SDS archive or the FDSN dataselect."""
+        if self.sds:
+            # Use SDS (SeisComP Data Structure) to get traces rather than
+            # FDSN dataselect. Fetch one bulk entry (= one component) at a
+            # time instead of calling get_waveforms_bulk() directly: a
+            # single corrupt/truncated day file on disk (e.g. a zero-filled
+            # MiniSEED file) raises errors get_waveforms_bulk() doesn't
+            # catch (InternalMSEEDParseTimeError, TypeError from format
+            # sniffing, ...) and aborts the whole event instead of just
+            # dropping that one component.
+            traces = Stream()
+            for entry in bulk:
+                net, sta, loc, chan, t1, t2 = entry
+                try:
+                    traces += self.trace_client_sds.get_waveforms(
+                        net, sta, loc, chan, t1, t2
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[%s] Skipping unreadable SDS data for %s.%s.%s.%s: %s",
+                        self.event.id, net, sta, loc, chan, e,
+                    )
+            return traces
+        if self.fdsn_max_workers > 1:
+            return self._parallel_get_waveforms_bulk(bulk)
+        return self._sequential_get_waveforms_bulk(bulk)
+
+    def _family_candidates(self, net, sta, starttime):
+        """Other instrument families of a station, best first, as wildcard waveform ids (``NET.STA.LOC.HN?``):
+        those the sample-rate preference dropped, then those of the local inventory (when one is given)."""
+        cands = list(getattr(self, "_dropped_waveforms", {}).get((net, sta), []))
+        if self.inventory:
+            asked = {".".join(w.split(".")[2:])[:-1] for w in self.waveforms_id if w.split(".")[:2] == [net, sta]}
+            found = []
+            for n in self.inventory.select(network=net, station=sta, time=starttime):
+                for s in n:
+                    for c in s.select(channel="[SBHED][HLNP]Z"):
+                        wid = f"{net}.{sta}.{c.location_code or ''}.{c.code[:2]}?"
+                        if f"{c.location_code or ''}.{c.code[:2]}" in asked or wid in cands:
+                            continue
+                        prio = (c.sample_rate or 0, INSTRUMENT_PRIORITY.get(c.code[1].upper(), -1))
+                        found.append((prio, wid))
+            for _, wid in sorted(found, key=lambda f: f[0], reverse=True):
+                if wid not in cands:
+                    cands.append(wid)
+        return cands
+
+    def _fetch_family_fallbacks(self, traces, starttime, endtime):
+        """``(stream, waveform_ids, inventory)`` of the stations asked that got no trace at all, from their next
+        instrument family that has data (a station picked on HNZ, served EH? by the preference, whose EH? holds
+        nothing at that date). A station that got data, even one component, keeps it: what was asked is served."""
+        out, wids, inv = Stream(), [], Inventory()
+        have = {(tr.stats.network, tr.stats.station) for tr in traces}
+        asked = list(dict.fromkeys(tuple(w.split(".")[:2]) for w in self.waveforms_id))
+        pending = {k: self._family_candidates(*k, starttime) for k in asked if k not in have}
+        pending = {k: c for k, c in pending.items() if c}
+        # rounds: every station still without data asks its next family, all of them in one parallel bulk
+        while pending:
+            tried = {k: c.pop(0) for k, c in pending.items()}
+            got = self._get_bulk(self._build_bulk_entries(list(tried.values()), starttime, endtime))
+            served = {(tr.stats.network, tr.stats.station) for tr in got}
+            for k, wid in tried.items():
+                if k not in served:
+                    continue
+                logger.info("%s: no data in the preferred family of %s.%s, using %s", self.event.id, *k, wid)
+                out += got.select(network=k[0], station=k[1])
+                wids.append(wid)
+                sta_inv = self._fetch_inventory_for_waveforms([wid], starttime, endtime)
+                if sta_inv is not None:
+                    inv += sta_inv
+            pending = {k: c for k, c in pending.items() if k not in served and c}
+        return out, wids, inv
 
     def _fetch_bulk_chunk(self, chunk):
         """Fetch a subset of bulk entries with retry logic."""
@@ -1294,6 +1416,9 @@ class EventFetcher(object):
             return None
 
     def _apply_preferred_sample_rate(self, inventory_df):
+        # waveform ids this preference drops, per (net, sta), best first: the family fallbacks of a station
+        # whose preferred family returns no data (see _fetch_family_fallbacks)
+        self._dropped_waveforms = {}
         channel_rates = _build_channel_rate_map(inventory_df)
         if not channel_rates["exact"] and not channel_rates["station"]:
             return
@@ -1302,6 +1427,7 @@ class EventFetcher(object):
         # D: very high, H: high, E: extended, B: broadband, S: short period
         sample_rate_priority = {"D": 4, "H": 3, "E": 2, "B": 2, "S": 1}
         best_waveforms = {}
+        ranked = []                                     # (priority, wid) of every waveform id
         for idx, wid in enumerate(self.waveforms_id):
             net, sta, loc, chan = wid.split(".")
             component = chan[-1] if chan else ""
@@ -1338,6 +1464,7 @@ class EventFetcher(object):
             current = best_waveforms.get(key)
             # Comparaison lexicographique de tuples : compare élément par élément
             new_priority = (rate_cmp, instrument_prio, sample_rate_prio, chan)
+            ranked.append((new_priority, wid))
             current_priority = (
                 current["rate"],
                 current["instrument_prio"],
@@ -1358,6 +1485,13 @@ class EventFetcher(object):
             entry["waveform"]
             for entry in sorted(best_waveforms.values(), key=lambda e: e["idx"])
         ]
+        kept = set(preferred_waveforms)
+        for prio, wid in sorted(ranked, key=lambda r: r[0], reverse=True):
+            if wid not in kept:
+                net, sta = wid.split(".")[:2]
+                dropped = self._dropped_waveforms.setdefault((net, sta), [])
+                if wid not in dropped:
+                    dropped.append(wid)
 
         if preferred_waveforms and len(preferred_waveforms) != len(self.waveforms_id):
             logger.debug(
@@ -1432,32 +1566,15 @@ class EventFetcher(object):
             )
 
         logger.debug(f"{self.event.id}: getting waveforms ...")
-        if self.sds:
-            # Use SDS (SeisComP Data Structure) to get traces rather than
-            # FDSN dataselect. Fetch one bulk entry (= one component) at a
-            # time instead of calling get_waveforms_bulk() directly: a
-            # single corrupt/truncated day file on disk (e.g. a zero-filled
-            # MiniSEED file) raises errors get_waveforms_bulk() doesn't
-            # catch (InternalMSEEDParseTimeError, TypeError from format
-            # sniffing, ...) and aborts the whole event instead of just
-            # dropping that one component.
-            traces = Stream()
-            for entry in bulk:
-                net, sta, loc, chan, t1, t2 = entry
-                try:
-                    traces += self.trace_client_sds.get_waveforms(
-                        net, sta, loc, chan, t1, t2
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[%s] Skipping unreadable SDS data for %s.%s.%s.%s: %s",
-                        self.event.id, net, sta, loc, chan, e,
-                    )
-        else:
-            if self.fdsn_max_workers > 1:
-                traces = self._parallel_get_waveforms_bulk(bulk)
-            else:
-                traces = self._sequential_get_waveforms_bulk(bulk)
+        traces = self._get_bulk(bulk)
+
+        # a station whose preferred family returned nothing: its other families (dropped by the preference, or
+        # in the local inventory), best first
+        extra, extra_wids, extra_inv = self._fetch_family_fallbacks(traces, starttime, endtime)
+        if extra:
+            traces += extra
+            self.waveforms_id = list(self.waveforms_id) + extra_wids
+            inventory += extra_inv
 
         # merge multiple segments if any
         try:
